@@ -41,13 +41,11 @@ user_last_message_time = {}
 active_sessions = {}
 user_current_check = {}
 user_pending_mass = {}
-user_pending_proxies = {}  # للملفات المنتظرة
 
 bot = TelegramClient('joker_bot', API_ID, API_HASH)
 
 # ==================== دوال المواقع (عامة) ====================
 def load_sites():
-    """تحميل المواقع من الملف العام sites.txt"""
     if not os.path.exists('sites.txt'):
         return []
     try:
@@ -57,7 +55,6 @@ def load_sites():
         return []
 
 def save_sites(sites):
-    """حفظ المواقع في الملف العام sites.txt"""
     with open('sites.txt', 'w', encoding='utf-8') as f:
         for site in sites:
             f.write(f"{site}\n")
@@ -296,19 +293,6 @@ async def send_with_retry(user_id, message, parse_mode='html', buttons=None, fil
             return None
         raise
 
-async def cleanup_expired_pending():
-    now = time.time()
-    for user_id in list(user_pending_mass.keys()):
-        if user_pending_mass[user_id]['expires'] < now:
-            try:
-                os.remove(user_pending_mass[user_id]['file_path'])
-            except:
-                pass
-            del user_pending_mass[user_id]
-    for user_id in list(user_pending_proxies.keys()):
-        if user_pending_proxies[user_id]['expires'] < now:
-            del user_pending_proxies[user_id]
-
 # ==================== الإيموجي المميزة ====================
 PREMIUM_EMOJI_IDS = {
     "✅": "5123163417326126159", "❌": "5121063440311386962", "🔥": "5116414868357907335",
@@ -379,7 +363,7 @@ async def get_user_stats_text(user_id, username):
     text += f"🔌 Add proxies: /addproxy or /addproxies"
     return text
 
-# ==================== دوال API للفحص ====================
+# ==================== دوال API السريعة ====================
 ALLOWED_GATEWAYS = ['shopify payments', 'shopify', 'shopify_payments']
 
 def parse_proxy_url(proxy_str):
@@ -396,36 +380,46 @@ def parse_proxy_url(proxy_str):
         return f"http://{host}:{port}"
     return None
 
-async def test_proxy_direct(proxy_str):
+# فحص بروكسي سريع (مهلة 3 ثواني)
+async def test_proxy_fast(proxy_str):
     proxy_url = parse_proxy_url(proxy_str)
     if not proxy_url:
         return {'proxy': proxy_str, 'status': 'dead', 'reason': 'Invalid format'}
     try:
-        timeout = aiohttp.ClientTimeout(total=15)
+        timeout = aiohttp.ClientTimeout(total=3)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get("https://musicstore.myshopify.com", proxy=proxy_url, ssl=False) as resp:
                 if resp.status == 200:
                     return {'proxy': proxy_str, 'status': 'alive', 'reason': 'OK'}
                 return {'proxy': proxy_str, 'status': 'dead', 'reason': f'HTTP {resp.status}'}
-    except Exception as e:
-        return {'proxy': proxy_str, 'status': 'dead', 'reason': str(e)[:30]}
+    except:
+        return {'proxy': proxy_str, 'status': 'dead', 'reason': 'Timeout'}
 
-async def test_site(site, proxy):
+# فحص موقع سريع (مهلة 5 ثواني)
+async def test_site_fast(site, proxy):
     test_card = "4031630422575208|01|2030|280"
     try:
         site = site.replace('https://', '').replace('http://', '').rstrip('/')
         url = f'{CHECKER_API_URL}/shopify?site={site}&cc={test_card}'
         if proxy:
             url += f'&proxy={proxy}'
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+        
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url) as resp:
                 if resp.status != 200:
                     return {'site': site, 'status': 'dead'}
-                raw = await resp.json()
-                return {'site': site, 'status': 'alive' if raw.get('Status') else 'dead'}
+                try:
+                    raw = await resp.json()
+                    if raw.get('Status', False):
+                        return {'site': site, 'status': 'alive'}
+                    return {'site': site, 'status': 'dead'}
+                except:
+                    return {'site': site, 'status': 'dead'}
     except:
         return {'site': site, 'status': 'dead'}
 
+# فحص كارت عادي
 async def check_card(card, site, proxy):
     try:
         site = site.replace('https://', '').replace('http://', '').rstrip('/')
@@ -663,10 +657,11 @@ async def handle_callback(event):
 ├ /rmsite url - Remove site
 ├ /addsites - Upload sites file
 ├ /clearsites - Clear all
+├ /sitecheck - Check all sites
 ├ /mysites - View all sites
 
 <b>🔌 YOUR PROXIES</b>
-├ /proxy - Check & remove dead
+├ /proxy - Check & remove dead (FAST)
 ├ /addproxy - Add (one per line)
 ├ /addproxies - Upload .txt file
 ├ /chkproxy - Check one
@@ -920,14 +915,13 @@ async def add_site_cmd(event):
         return
     site = args[1].replace('https://', '').replace('http://', '').rstrip('/')
     
-    # فحص الموقع
     proxies = load_user_proxies(user_id)
     if not proxies:
         await send_with_retry(user_id, premium_emoji("❌ Add proxies first using /addproxy"), parse_mode='html')
         return
     
     msg = await send_with_retry(user_id, premium_emoji(f"🔄 Testing {site}..."), parse_mode='html')
-    result = await test_site(site, random.choice(proxies))
+    result = await test_site_fast(site, random.choice(proxies))
     
     if result['status'] == 'alive':
         sites = load_sites()
@@ -996,7 +990,63 @@ async def addsites_cmd(event):
     save_sites(all_sites)
     await send_with_retry(user_id, premium_emoji(f"✅ Added {len(new_sites)} sites\nTotal: {len(all_sites)}"), parse_mode='html')
 
-# ==================== أوامر إدارة البروكسيات (لجميع المستخدمين) ====================
+# ==================== فحص المواقع السريع ====================
+@bot.on(events.NewMessage(pattern='/sitecheck'))
+async def sitecheck_cmd(event):
+    user_id = event.sender_id
+    if not is_admin(user_id):
+        await send_with_retry(user_id, premium_emoji("❌ Only admin can check sites."), parse_mode='html')
+        return
+    
+    sites = load_sites()
+    if not sites:
+        await send_with_retry(user_id, premium_emoji("❌ No sites to check."), parse_mode='html')
+        return
+    
+    proxies = load_user_proxies(user_id)
+    if not proxies:
+        await send_with_retry(user_id, premium_emoji("❌ No proxies available. Add proxies first."), parse_mode='html')
+        return
+    
+    total = len(sites)
+    msg = await send_with_retry(user_id, premium_emoji(f"⚡ Fast checking {total} sites...\n\n⏱️ Estimated: ~{max(3, total // 10)} seconds"), parse_mode='html')
+    
+    batch_size = 10
+    alive = []
+    dead = []
+    checked = 0
+    
+    for i in range(0, total, batch_size):
+        batch = sites[i:i+batch_size]
+        tasks = []
+        for site in batch:
+            proxy = random.choice(proxies)
+            tasks.append(test_site_fast(site, proxy))
+        
+        results = await asyncio.gather(*tasks)
+        
+        for res in results:
+            if res['status'] == 'alive':
+                alive.append(res['site'])
+            else:
+                dead.append(res['site'])
+        
+        checked += len(batch)
+        await msg.edit(premium_emoji(f"⚡ Checking sites...\n\n📊 {checked}/{total}\n✅ Alive: {len(alive)}\n❌ Dead: {len(dead)}"), parse_mode='html')
+    
+    save_sites(alive)
+    
+    result_text = f"""✅ <b>Site Check Complete!</b>
+
+📊 Total: {total}
+✅ Alive: {len(alive)}
+❌ Dead: {len(dead)}
+
+💡 Sites updated with only working ones."""
+    
+    await msg.edit(premium_emoji(result_text), parse_mode='html')
+
+# ==================== أوامر إدارة البروكسيات السريعة ====================
 @bot.on(events.NewMessage(pattern='/addproxy'))
 async def addproxy_cmd(event):
     user_id = event.sender_id
@@ -1047,7 +1097,7 @@ async def chkproxy_cmd(event):
         await send_with_retry(user_id, premium_emoji("❌ Usage: /chkproxy ip:port:user:pass"), parse_mode='html')
         return
     msg = await send_with_retry(user_id, premium_emoji(f"🔄 Checking..."), parse_mode='html')
-    res = await test_proxy_direct(args[1])
+    res = await test_proxy_fast(args[1])
     if res['status'] == 'alive':
         await msg.edit(premium_emoji(f"✅ <b>ALIVE</b>\n<code>{args[1]}</code>"), parse_mode='html')
     else:
@@ -1084,16 +1134,40 @@ async def proxy_check_cmd(event):
     if not proxies:
         await send_with_retry(user_id, premium_emoji("❌ No proxies to check\n\nAdd proxies using:\n/addproxy ip:port:user:pass\n/addproxies (reply to .txt)"), parse_mode='html')
         return
-    msg = await send_with_retry(user_id, premium_emoji(f"🔥 Checking {len(proxies)} proxies..."), parse_mode='html')
+    
+    total = len(proxies)
+    msg = await send_with_retry(user_id, premium_emoji(f"⚡ Fast checking {total} proxies...\n\n⏱️ Estimated: ~{max(3, total // 15)} seconds"), parse_mode='html')
+    
+    batch_size = 20
     alive = []
-    for i, p in enumerate(proxies):
-        res = await test_proxy_direct(p)
-        if res['status'] == 'alive':
-            alive.append(p)
-        if (i + 1) % 10 == 0:
-            await msg.edit(premium_emoji(f"📊 Progress: {i+1}/{len(proxies)}\n✅ Alive: {len(alive)}"), parse_mode='html')
+    dead = []
+    checked = 0
+    
+    for i in range(0, total, batch_size):
+        batch = proxies[i:i+batch_size]
+        tasks = [test_proxy_fast(p) for p in batch]
+        results = await asyncio.gather(*tasks)
+        
+        for res in results:
+            if res['status'] == 'alive':
+                alive.append(res['proxy'])
+            else:
+                dead.append(res['proxy'])
+        
+        checked += len(batch)
+        await msg.edit(premium_emoji(f"⚡ Checking proxies...\n\n📊 {checked}/{total}\n✅ Alive: {len(alive)}\n❌ Dead: {len(dead)}"), parse_mode='html')
+    
     save_user_proxies(user_id, alive)
-    await msg.edit(premium_emoji(f"✅ <b>Proxy Check Complete!</b>\n\nTotal: {len(proxies)}\n✅ Alive: {len(alive)}\n❌ Removed: {len(proxies)-len(alive)}"), parse_mode='html')
+    
+    result_text = f"""✅ <b>Proxy Check Complete!</b>
+
+📊 Total: {total}
+✅ Alive: {len(alive)}
+❌ Dead: {len(dead)}
+
+💡 Your proxies have been updated with only working ones."""
+    
+    await msg.edit(premium_emoji(result_text), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/getproxy'))
 async def getproxy_cmd(event):
@@ -1252,7 +1326,6 @@ async def mode_select(event):
         await event.edit(premium_emoji("❌ No valid cards found"), parse_mode='html')
         return
     
-    # تطبيق الحد الأقصى للكروت في الكومبو الواحد
     max_cards = MAX_CARDS_PER_COMBO if not is_admin(user_id) else ADMIN_MAX_CARDS
     if len(cards) > max_cards:
         await event.edit(premium_emoji(f"⚠️ Max {max_cards} cards per combo.\nYour file has {len(cards)} cards.\nChecking first {max_cards} cards."), parse_mode='html')
@@ -1373,7 +1446,7 @@ async def gencode_cmd(event):
     if not is_admin(event.sender_id):
         return
     args = event.text.split()
-    hours = 24  # افتراضي 24 ساعة
+    hours = 24
     if len(args) > 1:
         try:
             hours = int(args[1])
@@ -1564,7 +1637,6 @@ async def redeem_cmd(event):
 async def main():
     await bot.start(bot_token=BOT_TOKEN)
     
-    # إضافة الأدمن تلقائياً
     for admin in ADMIN_IDS:
         users = load_users()
         if str(admin) not in users:
@@ -1578,16 +1650,14 @@ async def main():
             }
             save_users(users)
     
-    # إنشاء ملف sites.txt إذا لم يكن موجوداً
     if not os.path.exists('sites.txt'):
         with open('sites.txt', 'w') as f:
             pass
     
-    # تشغيل مهمة فحص الدفعات
     asyncio.create_task(check_for_payments())
     
     print("=" * 50)
-    print("✅ SONIC BOT STARTED")
+    print("✅ SONIC BOT STARTED (FAST VERSION)")
     print(f"👑 Admins: {ADMIN_IDS}")
     print(f"⭐ Subscription plans:")
     print(f"   - 1 Hour: 30 stars")
