@@ -6,16 +6,14 @@ import random
 import time
 import requests
 import string
+import secrets
 import threading
 from datetime import datetime, timedelta
 from telebot.types import LabeledPrice, PreCheckoutQuery, InlineKeyboardMarkup, InlineKeyboardButton
-import aiohttp
-import aiofiles
-import asyncio
 
 # ==================== إعدادات البوت ====================
 BOT_TOKEN = '8985561921:AAH26NPSH3Iin7RCpKfi1Q057X1umDjfgds'
-ADMIN_IDS = [1093032296,7077116674]
+ADMIN_IDS = [1093032296]
 CHECKER_API_URL = 'https://apiehopf-production.up.railway.app'
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
@@ -36,6 +34,11 @@ MAX_USER_PROXIES = 30
 SITES_FILE = "sites.txt"
 USERS_FILE = "users.json"
 CODES_FILE = "codes.json"
+
+# ==================== متغيرات عالمية ====================
+active_scans = {}
+user_pending_mass = {}
+user_pending_sites = {}
 
 # ==================== دوال مساعدة ====================
 def is_admin(user_id):
@@ -452,6 +455,122 @@ def get_user_stats_text(user_id, username):
     text += f"💡 Made by: @ISoonik"
     return text
 
+# ==================== دوال فحص المواقع ====================
+ALLOWED_GATEWAYS = ['shopify payments', 'shopify', 'shopify_payments', 'stripe']
+
+def test_site(site, proxy):
+    test_card = "4031630422575208|01|2030|280"
+    try:
+        if site.startswith('https://') or site.startswith('http://'):
+            site = site.replace('https://', '').replace('http://', '').rstrip('/')
+        url = f'{CHECKER_API_URL}/shopify?site={site}&cc={test_card}'
+        if proxy:
+            url += f'&proxy={proxy}'
+        response = requests.get(url, timeout=30)
+        if response.status_code != 200:
+            return {'site': site, 'status': 'dead'}
+        raw = response.json()
+        if raw.get('Status', False):
+            return {'site': site, 'status': 'alive'}
+        else:
+            return {'site': site, 'status': 'dead'}
+    except:
+        return {'site': site, 'status': 'dead'}
+
+def get_site_gateway(site, proxy):
+    test_card = "4031630422575208|01|2030|280"
+    try:
+        if site.startswith('https://') or site.startswith('http://'):
+            site = site.replace('https://', '').replace('http://', '').rstrip('/')
+        url = f'{CHECKER_API_URL}/shopify?site={site}&cc={test_card}'
+        if proxy:
+            url += f'&proxy={proxy}'
+        response = requests.get(url, timeout=30)
+        if response.status_code != 200:
+            return None
+        raw = response.json()
+        gateway = raw.get('Gateway', '').lower()
+        return gateway
+    except:
+        return None
+
+def get_site_min_price(site):
+    try:
+        if site.startswith('https://') or site.startswith('http://'):
+            site = site.replace('https://', '').replace('http://', '').rstrip('/')
+        url = f'https://{site}/products.json?limit=50'
+        response = requests.get(url, timeout=30)
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        products = data.get('products', [])
+        min_price = None
+        for product in products:
+            variants = product.get('variants', [])
+            for variant in variants:
+                if variant.get('available', True):
+                    try:
+                        price = float(variant.get('price', 0))
+                        if min_price is None or price < min_price:
+                            min_price = price
+                    except:
+                        pass
+        return min_price
+    except:
+        return None
+
+def get_bin_info(card_number):
+    try:
+        bin_number = card_number[:6]
+        response = requests.get(f'https://bins.antipublic.cc/bins/{bin_number}', timeout=10)
+        if response.status_code != 200:
+            return '-', '-', '-', '-', '-', ''
+        data = response.json()
+        brand = data.get('brand', '-')
+        bin_type = data.get('type', '-')
+        level = data.get('level', '-')
+        bank = data.get('bank', '-')
+        country = data.get('country_name', '-')
+        flag = data.get('country_flag', '')
+        return brand, bin_type, level, bank, country, flag
+    except:
+        return '-', '-', '-', '-', '-', ''
+
+def extract_cc(text):
+    pattern = r'(\d{15,16})\|(\d{2})\|(\d{2,4})\|(\d{3,4})'
+    matches = re.findall(pattern, text)
+    cards = []
+    for match in matches:
+        card, month, year, cvv = match
+        if len(year) == 2:
+            year = '20' + year
+        cards.append(f"{card}|{month}|{year}|{cvv}")
+    return cards
+
+def send_hit_message(user_id, result, hit_type):
+    if hit_type == 'Charged':
+        emoji = "💎"
+        status_text = "𝐂𝐇𝐀𝐑𝐆𝐄𝐃"
+    else:
+        emoji = "✅"
+        status_text = "𝐀𝐏𝐏𝐑𝐎𝐕𝐄𝐃"
+    brand, bin_type, level, bank, country, flag = get_bin_info(result['card'].split('|')[0])
+    message = f"""<b>━━━━━━━━━━━━━━━━━</b>
+<b>⚡ 𝐇𝐢𝐭</b>
+<blockquote>{emoji} Status: {status_text}</blockquote>
+<blockquote>💳 Card: <code>{result['card']}</code></blockquote>
+<blockquote>📝 Response: {result['message'][:150]}</blockquote>
+<blockquote>🌐 Gateway: 🔥 {result.get('gateway', 'Unknown')} | 💰 {result.get('price', '-')}</blockquote>
+<b>💠 BIN Info</b>
+<pre>BIN Info: {brand} - {bin_type} - {level}
+Bank: {bank}
+Country: {country} {flag}</pre>
+"""
+    try:
+        bot.send_message(user_id, message, parse_mode='HTML')
+    except:
+        pass
+
 # ==================== معالجة الدفع بالنجوم ====================
 @bot.pre_checkout_query_handler(func=lambda query: True)
 def handle_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
@@ -469,17 +588,15 @@ def handle_successful_payment(message):
             bot.send_message(user_id, f"✅ <b>Subscription Activated!</b>\n\nYour {STAR_PRICES[plan_key]['name']} subscription has been activated.\n\nExpires: {datetime.fromtimestamp(expiry).strftime('%Y-%m-%d %H:%M:%S')}", parse_mode='HTML')
         else:
             bot.send_message(user_id, "❌ Error activating subscription. Please contact admin.")
-    # إشعار للأدمن
-    user = message.from_user
     for admin_id in ADMIN_IDS:
-        bot.send_message(admin_id, f"💎 <b>New Star Payment!</b>\n\n👤 User: {user.first_name}\n🆔 ID: <code>{user_id}</code>\n💰 Amount: {message.successful_payment.total_amount} stars", parse_mode='HTML')
+        bot.send_message(admin_id, f"💎 <b>New Star Payment!</b>\n\n👤 User: {message.from_user.first_name}\n🆔 ID: <code>{user_id}</code>\n💰 Amount: {message.successful_payment.total_amount} stars", parse_mode='HTML')
 
 # ==================== أوامر البوت ====================
 @bot.message_handler(commands=['start'])
 def start_command(message):
     user_id = message.from_user.id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>")
+        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>", parse_mode='HTML')
         return
     username = message.from_user.username or f"user_{user_id}"
     create_user_if_not_exists(user_id, username)
@@ -490,7 +607,7 @@ def start_command(message):
 def help_command(message):
     user_id = message.from_user.id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>")
+        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>", parse_mode='HTML')
         return
     help_text = """<b>📋 User Commands:</b>
 
@@ -545,7 +662,7 @@ def help_command(message):
 def profile_command(message):
     user_id = message.from_user.id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>")
+        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>", parse_mode='HTML')
         return
     users = load_users()
     user_data = users.get(str(user_id), {})
@@ -585,7 +702,7 @@ def profile_command(message):
 def myproxy_command(message):
     user_id = message.from_user.id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>")
+        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>", parse_mode='HTML')
         return
     proxies = load_user_proxies(user_id)
     if not proxies:
@@ -595,76 +712,82 @@ def myproxy_command(message):
         proxy_list = "\n".join([f"{i+1}. <code>{p}</code>" for i, p in enumerate(proxies)])
         bot.reply_to(message, f"<b>📋 Your proxies ({len(proxies)}):</b>\n\n{proxy_list}", parse_mode='HTML')
     else:
-        with open(f"proxies_{user_id}.txt", 'w') as f:
+        filename = f"proxies_{user_id}_{int(time.time())}.txt"
+        with open(filename, 'w') as f:
             for i, proxy in enumerate(proxies):
                 f.write(f"{i+1}. {proxy}\n")
-        with open(f"proxies_{user_id}.txt", 'rb') as f:
+        with open(filename, 'rb') as f:
             bot.send_document(user_id, f, caption=f"<b>📋 Your proxies ({len(proxies)}):</b>", parse_mode='HTML')
-        os.remove(f"proxies_{user_id}.txt")
+        os.remove(filename)
 
 @bot.message_handler(commands=['addproxy'])
 def addproxy_command(message):
     user_id = message.from_user.id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>")
+        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>", parse_mode='HTML')
+        return
+    msg = bot.reply_to(message, "📝 <b>Send proxies one per line.</b>\n\nExample:\n<code>proxy1:port:user:pass\nproxy2:port:user:pass</code>\n\nSend /cancel to cancel.", parse_mode='HTML')
+    bot.register_next_step_handler(msg, process_addproxy, user_id)
+
+def process_addproxy(message, user_id):
+    if message.text and message.text.lower() == '/cancel':
+        bot.reply_to(message, "❌ Operation cancelled.")
+        return
+    proxies_to_add = [line.strip() for line in message.text.split('\n') if line.strip()]
+    if not proxies_to_add:
+        bot.reply_to(message, "❌ No proxies provided.")
+        return
+    current_proxies = load_user_proxies(user_id)
+    if len(current_proxies) + len(proxies_to_add) > MAX_USER_PROXIES:
+        remaining = MAX_USER_PROXIES - len(current_proxies)
+        bot.reply_to(message, f"⚠️ <b>Proxy limit reached!</b>\n\nYou can only have {MAX_USER_PROXIES} proxies maximum.\nYou have {len(current_proxies)} proxies.\nYou can add {remaining} more proxies.", parse_mode='HTML')
+        return
+    new_proxies = [p for p in proxies_to_add if p not in current_proxies]
+    if not new_proxies:
+        bot.reply_to(message, "⚠️ All proxies already exist.")
+        return
+    with open(get_user_proxy_file(user_id), 'a') as f:
+        for proxy in new_proxies:
+            f.write(f"{proxy}\n")
+    bot.reply_to(message, f"✅ <b>Proxies Added!</b>\n\nAdded {len(new_proxies)} new proxies.\nTotal proxies: {len(current_proxies) + len(new_proxies)}/{MAX_USER_PROXIES}", parse_mode='HTML')
+
+@bot.message_handler(commands=['addproxies'], content_types=['document'])
+def addproxies_command(message):
+    user_id = message.from_user.id
+    if is_user_blocked(user_id) and not is_admin(user_id):
+        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>", parse_mode='HTML')
+        return
+    if not message.document:
+        bot.reply_to(message, "❌ Please send a .txt file.")
+        return
+    if not message.document.file_name.endswith('.txt'):
+        bot.reply_to(message, "❌ Please send a .txt file.")
         return
     try:
-        args = message.text.split('\n')
-        if len(args) < 2:
-            bot.reply_to(message, "❌ Usage: /addproxy then proxies one per line.")
-            return
-        proxies_to_add = [line.strip() for line in args[1:] if line.strip()]
-        if not proxies_to_add:
-            bot.reply_to(message, "❌ No proxies provided.")
+        file_info = bot.get_file(message.document.file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+        content = downloaded_file.decode('utf-8')
+        proxies = [line.strip() for line in content.split('\n') if line.strip()]
+        if not proxies:
+            bot.reply_to(message, "❌ No valid proxies found in file.")
             return
         current_proxies = load_user_proxies(user_id)
-        if len(current_proxies) + len(proxies_to_add) > MAX_USER_PROXIES:
-            remaining = MAX_USER_PROXIES - len(current_proxies)
-            bot.reply_to(message, f"⚠️ <b>Proxy limit reached!</b>\n\nYou can only have {MAX_USER_PROXIES} proxies maximum.\nYou have {len(current_proxies)} proxies.\nYou can add {remaining} more proxies.", parse_mode='HTML')
-            return
-        new_proxies = [p for p in proxies_to_add if p not in current_proxies]
+        new_proxies = [p for p in proxies if p not in current_proxies]
         if not new_proxies:
             bot.reply_to(message, "⚠️ All proxies already exist.")
             return
         with open(get_user_proxy_file(user_id), 'a') as f:
             for proxy in new_proxies:
                 f.write(f"{proxy}\n")
-        bot.reply_to(message, f"✅ <b>Proxies Added!</b>\n\nAdded {len(new_proxies)} new proxies.\nTotal proxies: {len(current_proxies) + len(new_proxies)}/{MAX_USER_PROXIES}", parse_mode='HTML')
+        bot.reply_to(message, f"✅ <b>Proxies Added!</b>\n\nAdded {len(new_proxies)} new proxies.\nTotal proxies: {len(current_proxies) + len(new_proxies)}", parse_mode='HTML')
     except Exception as e:
-        bot.reply_to(message, f"❌ Error: {e}")
-
-@bot.message_handler(commands=['addproxies'], content_types=['document'])
-def addproxies_file_command(message):
-    user_id = message.from_user.id
-    if is_user_blocked(user_id) and not is_admin(user_id):
-        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>")
-        return
-    if not message.document:
-        bot.reply_to(message, "❌ Reply to a .txt file containing proxies.")
-        return
-    if not message.document.file_name.endswith('.txt'):
-        bot.reply_to(message, "❌ Please send a .txt file.")
-        return
-    file_info = bot.get_file(message.document.file_id)
-    downloaded_file = bot.download_file(file_info.file_path)
-    content = downloaded_file.decode('utf-8')
-    proxies = [line.strip() for line in content.split('\n') if line.strip()]
-    if not proxies:
-        bot.reply_to(message, "❌ No valid proxies found in file.")
-        return
-    current_proxies = load_user_proxies(user_id)
-    new_proxies = [p for p in proxies if p not in current_proxies]
-    if new_proxies:
-        with open(get_user_proxy_file(user_id), 'a') as f:
-            for proxy in new_proxies:
-                f.write(f"{proxy}\n")
-    bot.reply_to(message, f"✅ <b>Proxies Added!</b>\n\nAdded {len(new_proxies)} new proxies.\nTotal proxies: {len(current_proxies) + len(new_proxies)}", parse_mode='HTML')
+        bot.reply_to(message, f"❌ Error processing file: {e}")
 
 @bot.message_handler(commands=['chkproxy'])
 def chkproxy_command(message):
     user_id = message.from_user.id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>")
+        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>", parse_mode='HTML')
         return
     try:
         proxy = message.text.split(' ', 1)[1].strip()
@@ -685,7 +808,7 @@ def chkproxy_command(message):
 def rmproxy_command(message):
     user_id = message.from_user.id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>")
+        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>", parse_mode='HTML')
         return
     try:
         proxy_to_remove = message.text.split(' ', 1)[1].strip()
@@ -704,7 +827,7 @@ def rmproxy_command(message):
 def clearproxy_command(message):
     user_id = message.from_user.id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>")
+        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>", parse_mode='HTML')
         return
     current_proxies = load_user_proxies(user_id)
     count = len(current_proxies)
@@ -718,7 +841,7 @@ def clearproxy_command(message):
 def proxy_check_command(message):
     user_id = message.from_user.id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>")
+        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>", parse_mode='HTML')
         return
     proxies = load_user_proxies(user_id)
     if not proxies:
@@ -729,7 +852,7 @@ def proxy_check_command(message):
     for proxy in proxies:
         result = test_proxy_direct(proxy)
         results.append(result)
-        time.sleep(0.5)
+        time.sleep(0.3)
     alive_proxies = [r['proxy'] for r in results if r['status'] == 'alive']
     dead_proxies = [r['proxy'] for r in results if r['status'] == 'dead']
     dead_reasons = [f"• {r['proxy'][:30]}... -> {r['reason']}" for r in results if r['status'] == 'dead']
@@ -756,7 +879,7 @@ Your proxies have been updated with only working proxies."""
 def getproxy_command(message):
     user_id = message.from_user.id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>")
+        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>", parse_mode='HTML')
         return
     proxies = load_user_proxies(user_id)
     if not proxies:
@@ -766,29 +889,28 @@ def getproxy_command(message):
         proxy_list = "\n".join([f"{i+1}. <code>{p}</code>" for i, p in enumerate(proxies)])
         bot.reply_to(message, f"<b>📋 All Proxies ({len(proxies)}):</b>\n\n{proxy_list}", parse_mode='HTML')
     else:
-        with open(f"proxies_{user_id}.txt", 'w') as f:
+        filename = f"proxies_{user_id}_{int(time.time())}.txt"
+        with open(filename, 'w') as f:
             for i, proxy in enumerate(proxies):
                 f.write(f"{i+1}. {proxy}\n")
-        with open(f"proxies_{user_id}.txt", 'rb') as f:
+        with open(filename, 'rb') as f:
             bot.send_document(user_id, f, caption=f"<b>📋 All Proxies ({len(proxies)}):</b>", parse_mode='HTML')
-        os.remove(f"proxies_{user_id}.txt")
+        os.remove(filename)
 
 @bot.message_handler(commands=['mcancel'])
 def mcancel_command(message):
     user_id = message.from_user.id
-    # مسح الفحص النشط
-    if user_id in active_scans:
+    if user_id in active_scans and active_scans.get(user_id, {}).get("active", False):
         active_scans[user_id]['stop_requested'] = True
         bot.reply_to(message, "✅ <b>Mass check cancelled!</b>", parse_mode='HTML')
     else:
         bot.reply_to(message, "❌ No mass check in progress", parse_mode='HTML')
 
-# ==================== فحص كارت واحد (سينجل) ====================
 @bot.message_handler(commands=['cc'])
 def single_cc_check(message):
     user_id = message.from_user.id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>")
+        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>", parse_mode='HTML')
         return
     sites = load_admin_sites()
     proxies = load_user_proxies(user_id)
@@ -842,16 +964,11 @@ Country: {country} {flag}</pre>
     except Exception as e:
         bot.edit_message_text(f"❌ Error checking card: {e}", chat_id=message.chat.id, message_id=msg.message_id)
 
-# ==================== فحص جماعي (كومبو) ====================
-active_scans = {}
-user_pending_mass = {}
-user_pending_sites = {}
-
 @bot.message_handler(commands=['chk'], content_types=['document'])
 def mass_check_command(message):
     user_id = message.from_user.id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>")
+        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>", parse_mode='HTML')
         return
     if user_id in active_scans and active_scans.get(user_id, {}).get("active", False):
         bot.reply_to(message, "⏳ <b>You already have a check in progress. Wait until it completes.</b>", parse_mode='HTML')
@@ -892,9 +1009,11 @@ def mass_check_command(message):
         'total': total_cards,
         'sites': sites,
         'proxies': proxies,
-        'mode': None
+        'mode': None,
+        'message_id': None
     }
-    bot.reply_to(message, "📋 <b>Select mode:</b>\n\n• CHARGES ONLY: Only send charged cards\n• ALL HITS: Send charged + approved cards", reply_markup=get_mode_keyboard(), parse_mode='HTML')
+    msg = bot.reply_to(message, "📋 <b>Select mode:</b>\n\n• CHARGES ONLY: Only send charged cards\n• ALL HITS: Send charged + approved cards", reply_markup=get_mode_keyboard(), parse_mode='HTML')
+    user_pending_mass[user_id]['message_id'] = msg.message_id
 
 @bot.callback_query_handler(func=lambda call: call.data in ['mode_charges', 'mode_all', 'mode_cancel'])
 def handle_mode_selection(call):
@@ -913,10 +1032,10 @@ def handle_mode_selection(call):
     total_cards = pending['total']
     sites = pending['sites']
     proxies = pending['proxies']
-    msg = bot.edit_message_text(f"🔄 Starting check for {total_cards} cards...", chat_id=call.message.chat.id, message_id=call.message.message_id)
+    msg_id = pending['message_id']
+    bot.edit_message_text(f"🔄 Starting check for {total_cards} cards...", chat_id=call.message.chat.id, message_id=call.message.message_id)
     bot.answer_callback_query(call.id)
-    # بدء الفحص في thread منفصل
-    thread = threading.Thread(target=run_mass_check, args=(user_id, cards, sites, proxies, mode, msg.message_id))
+    thread = threading.Thread(target=run_mass_check, args=(user_id, cards, sites, proxies, mode, msg_id))
     thread.start()
 
 def run_mass_check(user_id, cards, sites, proxies, mode, message_id):
@@ -985,8 +1104,7 @@ def run_mass_check(user_id, cards, sites, proxies, mode, message_id):
             bot.edit_message_text(progress_text, chat_id=user_id, message_id=message_id, parse_mode='HTML')
         except:
             pass
-        time.sleep(random.uniform(0.8, 1.5))
-    # إرسال النتائج النهائية
+        time.sleep(random.uniform(0.8, 1.2))
     elapsed = int(time.time() - all_results['start_time'])
     hours = elapsed // 3600
     minutes = (elapsed % 3600) // 60
@@ -1140,10 +1258,12 @@ def users_command(message):
         total = data.get('total_checks', 0)
         text += f"<code>{uid}</code> | {username} | {premium} | {blocked} | {total} checks\n"
         if len(text) > 3500:
-            with open(f"users_{int(time.time())}.txt", 'w') as f:
+            filename = f"users_{int(time.time())}.txt"
+            with open(filename, 'w') as f:
                 f.write(text)
-            with open(f"users_{int(time.time())}.txt", 'rb') as f:
+            with open(filename, 'rb') as f:
                 bot.send_document(user_id, f)
+            os.remove(filename)
             text = ""
     if text:
         bot.reply_to(message, text, parse_mode='HTML')
@@ -1204,7 +1324,7 @@ def stats_command(message):
 def subscribe_command(message):
     user_id = message.from_user.id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>")
+        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>", parse_mode='HTML')
         return
     text = """⭐ <b>SONIC SUBSCRIPTION</b>
 
@@ -1225,7 +1345,7 @@ After payment, your subscription will be activated automatically."""
 def redeem_command(message):
     user_id = message.from_user.id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>")
+        bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>", parse_mode='HTML')
         return
     if is_admin(user_id):
         bot.reply_to(message, "👑 <b>You are admin, no need to redeem!</b>", parse_mode='HTML')
@@ -1367,6 +1487,7 @@ def addsites_file_command(message):
 def handle_callback(call):
     user_id = call.from_user.id
     data = call.data
+    
     if data == "show_commands":
         help_text = """<b>📋 BASIC COMMANDS</b>
 ├ <code>/start</code> - Show main menu
@@ -1416,11 +1537,13 @@ def handle_callback(call):
 └ <code>/stats</code> - Bot statistics"""
         bot.edit_message_text(help_text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_commands_keyboard(), parse_mode='HTML')
         bot.answer_callback_query(call.id)
+    
     elif data == "main_menu":
         username = call.from_user.username or f"user_{user_id}"
         stats_text = get_user_stats_text(user_id, username)
         bot.edit_message_text(stats_text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_main_menu_keyboard(), parse_mode='HTML')
         bot.answer_callback_query(call.id)
+    
     elif data == "show_subscription":
         text = """⭐ <b>SONIC SUBSCRIPTION</b>
 
@@ -1437,6 +1560,7 @@ Click on a plan below to pay with Telegram Stars.
 After payment, your subscription will be activated automatically."""
         bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_subscription_keyboard(), parse_mode='HTML')
         bot.answer_callback_query(call.id)
+    
     elif data.startswith("sub_"):
         plan_key = data.split("_")[1]
         plan = STAR_PRICES.get(plan_key)
@@ -1453,10 +1577,10 @@ After payment, your subscription will be activated automatically."""
                 provider_token="",
                 currency="XTR",
                 prices=prices,
-                start_parameter="subscription",
-                reply_markup=None
+                start_parameter="subscription"
             )
             bot.answer_callback_query(call.id)
+    
     elif data == "admin_stats" and is_admin(user_id):
         users = get_all_users()
         total_users = len(users)
@@ -1472,9 +1596,11 @@ After payment, your subscription will be activated automatically."""
 └ ⏱️ Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
         bot.edit_message_text(stats_text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_admin_menu_keyboard(), parse_mode='HTML')
         bot.answer_callback_query(call.id)
+    
     elif data == "admin_sites" and is_admin(user_id):
         bot.edit_message_text("🌐 <b>Site Management</b>\n\nChoose an option:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_admin_sites_menu(), parse_mode='HTML')
         bot.answer_callback_query(call.id)
+    
     elif data == "admin_panel" and is_admin(user_id):
         stats_text = """<b>👑 Admin Control Panel</b>
 
@@ -1490,6 +1616,7 @@ Use buttons below or direct commands:
 └ <code>/stats</code> - Bot statistics"""
         bot.edit_message_text(stats_text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_admin_menu_keyboard(), parse_mode='HTML')
         bot.answer_callback_query(call.id)
+    
     elif data == "admin_view_sites" and is_admin(user_id):
         sites = load_admin_sites()
         if not sites:
@@ -1498,9 +1625,11 @@ Use buttons below or direct commands:
             sites_text = "\n".join([f"• {site}" for site in sites])
             bot.edit_message_text(f"📋 <b>Sites ({len(sites)}):</b>\n\n{sites_text}", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='HTML')
         bot.answer_callback_query(call.id)
+    
     elif data == "admin_add_site" and is_admin(user_id):
         bot.edit_message_text("➕ <b>Add a site</b>\n\nSend the site domain.\nExample: <code>example.com</code>", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='HTML')
         bot.answer_callback_query(call.id)
+    
     elif data == "admin_remove_site" and is_admin(user_id):
         sites = load_admin_sites()
         if not sites:
@@ -1509,19 +1638,26 @@ Use buttons below or direct commands:
             sites_text = "\n".join([f"{i+1}. {site}" for i, site in enumerate(sites)])
             bot.edit_message_text(f"🗑️ <b>Remove a site</b>\n\nSend the site domain or number.\n\nCurrent sites:\n{sites_text}", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='HTML')
         bot.answer_callback_query(call.id)
+    
     elif data == "admin_check_sites" and is_admin(user_id):
         bot.edit_message_text("💰 <b>Select price range to filter sites:</b>\n\nSites will be filtered by their cheapest product price.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_price_filter_keyboard(), parse_mode='HTML')
         bot.answer_callback_query(call.id)
+    
     elif data == "admin_upload_sites" and is_admin(user_id):
         bot.edit_message_text("📁 <b>Upload sites file</b>\n\nSend a .txt file containing sites (one per line).\n\nYou will be asked to select a price filter after uploading.", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='HTML')
         bot.answer_callback_query(call.id)
+    
     elif data == "admin_clear_sites" and is_admin(user_id):
         save_admin_sites([])
         bot.edit_message_text("✅ <b>All sites have been cleared!</b>", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='HTML')
         bot.answer_callback_query(call.id)
+    
     elif data == "admin_cancel" and is_admin(user_id):
+        if user_id in user_pending_sites:
+            del user_pending_sites[user_id]
         bot.edit_message_text("❌ Operation cancelled.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_admin_menu_keyboard(), parse_mode='HTML')
         bot.answer_callback_query(call.id)
+    
     elif data.startswith("price_"):
         if user_id in user_pending_sites:
             pending = user_pending_sites.pop(user_id)
@@ -1538,7 +1674,7 @@ Use buttons below or direct commands:
             bot.edit_message_text(f"🔄 Processing {len(sites)} sites...\nPrice filter: {price_range['name']}", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='HTML')
             proxies = load_user_proxies(user_id)
             if not proxies:
-                bot.edit_message_text("❌ No proxies available.", chat_id=call.message.chat.id, message_id=call.message.message_id)
+                bot.edit_message_text("❌ No proxies available.", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='HTML')
                 bot.answer_callback_query(call.id)
                 return
             proxy = random.choice(proxies)
@@ -1588,129 +1724,14 @@ Sites have been updated with only working sites."""
 Use /sitecheck to verify all sites are working."""
             bot.edit_message_text(result_text, chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='HTML')
             bot.answer_callback_query(call.id)
+    
     elif data in ["admin_broadcast", "admin_block", "admin_unblock", "admin_set_limit"] and is_admin(user_id):
         bot.edit_message_text("Please use the command directly.\nExample: /broadcast message", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='HTML')
         bot.answer_callback_query(call.id)
+    
     else:
         bot.answer_callback_query(call.id)
 
-# ==================== دوال مساعدة إضافية ====================
-ALLOWED_GATEWAYS = ['shopify payments', 'shopify', 'shopify_payments', 'stripe']
-
-def test_site(site, proxy):
-    test_card = "4031630422575208|01|2030|280"
-    try:
-        if site.startswith('https://') or site.startswith('http://'):
-            site = site.replace('https://', '').replace('http://', '').rstrip('/')
-        url = f'{CHECKER_API_URL}/shopify?site={site}&cc={test_card}'
-        if proxy:
-            url += f'&proxy={proxy}'
-        response = requests.get(url, timeout=30)
-        if response.status_code != 200:
-            return {'site': site, 'status': 'dead'}
-        raw = response.json()
-        if raw.get('Status', False):
-            return {'site': site, 'status': 'alive'}
-        else:
-            return {'site': site, 'status': 'dead'}
-    except:
-        return {'site': site, 'status': 'dead'}
-
-def get_site_gateway(site, proxy):
-    test_card = "4031630422575208|01|2030|280"
-    try:
-        if site.startswith('https://') or site.startswith('http://'):
-            site = site.replace('https://', '').replace('http://', '').rstrip('/')
-        url = f'{CHECKER_API_URL}/shopify?site={site}&cc={test_card}'
-        if proxy:
-            url += f'&proxy={proxy}'
-        response = requests.get(url, timeout=30)
-        if response.status_code != 200:
-            return None
-        raw = response.json()
-        gateway = raw.get('Gateway', '').lower()
-        return gateway
-    except:
-        return None
-
-def get_site_min_price(site):
-    try:
-        if site.startswith('https://') or site.startswith('http://'):
-            site = site.replace('https://', '').replace('http://', '').rstrip('/')
-        url = f'https://{site}/products.json?limit=50'
-        response = requests.get(url, timeout=30)
-        if response.status_code != 200:
-            return None
-        data = response.json()
-        products = data.get('products', [])
-        min_price = None
-        for product in products:
-            variants = product.get('variants', [])
-            for variant in variants:
-                if variant.get('available', True):
-                    try:
-                        price = float(variant.get('price', 0))
-                        if min_price is None or price < min_price:
-                            min_price = price
-                    except:
-                        pass
-        return min_price
-    except:
-        return None
-
-def get_bin_info(card_number):
-    try:
-        bin_number = card_number[:6]
-        response = requests.get(f'https://bins.antipublic.cc/bins/{bin_number}', timeout=10)
-        if response.status_code != 200:
-            return '-', '-', '-', '-', '-', ''
-        data = response.json()
-        brand = data.get('brand', '-')
-        bin_type = data.get('type', '-')
-        level = data.get('level', '-')
-        bank = data.get('bank', '-')
-        country = data.get('country_name', '-')
-        flag = data.get('country_flag', '')
-        return brand, bin_type, level, bank, country, flag
-    except:
-        return '-', '-', '-', '-', '-', ''
-
-def extract_cc(text):
-    pattern = r'(\d{15,16})\|(\d{2})\|(\d{2,4})\|(\d{3,4})'
-    matches = re.findall(pattern, text)
-    cards = []
-    for match in matches:
-        card, month, year, cvv = match
-        if len(year) == 2:
-            year = '20' + year
-        cards.append(f"{card}|{month}|{year}|{cvv}")
-    return cards
-
-def send_hit_message(user_id, result, hit_type):
-    if hit_type == 'Charged':
-        emoji = "💎"
-        status_text = "𝐂𝐇𝐀𝐑𝐆𝐄𝐃"
-    else:
-        emoji = "✅"
-        status_text = "𝐀𝐏𝐏𝐑𝐎𝐕𝐄𝐃"
-    brand, bin_type, level, bank, country, flag = get_bin_info(result['card'].split('|')[0])
-    message = f"""<b>━━━━━━━━━━━━━━━━━</b>
-<b>⚡ 𝐇𝐢𝐭</b>
-<blockquote>{emoji} Status: {status_text}</blockquote>
-<blockquote>💳 Card: <code>{result['card']}</code></blockquote>
-<blockquote>📝 Response: {result['message'][:150]}</blockquote>
-<blockquote>🌐 Gateway: 🔥 {result.get('gateway', 'Unknown')} | 💰 {result.get('price', '-')}</blockquote>
-<b>💠 BIN Info</b>
-<pre>BIN Info: {brand} - {bin_type} - {level}
-Bank: {bank}
-Country: {country} {flag}</pre>
-"""
-    try:
-        bot.send_message(user_id, message, parse_mode='HTML')
-    except:
-        pass
-
-import secrets
 # ==================== تشغيل البوت ====================
 if __name__ == "__main__":
     print("=" * 50)
