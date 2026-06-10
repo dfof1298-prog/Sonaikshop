@@ -972,82 +972,115 @@ Country: {country} {flag}</pre>
     except Exception as e:
         bot.edit_message_text(f"❌ Error checking card: {e}", chat_id=message.chat.id, message_id=msg.message_id)
 
-@bot.message_handler(commands=['chk'], content_types=['document'])
+# ==================== فحص جماعي (كومبو) - النسخة المعدلة ====================
+@bot.message_handler(commands=['chk'])
 def mass_check_command(message):
     user_id = message.from_user.id
     if is_user_blocked(user_id) and not is_admin(user_id):
         bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>", parse_mode='HTML')
         return
+    
+    # التحقق من وجود فحص نشط
     if user_id in active_scans and active_scans.get(user_id, {}).get("active", False):
         bot.reply_to(message, "⏳ <b>You already have a check in progress. Wait until it completes.</b>", parse_mode='HTML')
         return
-    if not message.document:
-        bot.reply_to(message, "❌ Reply to a .txt file containing cards.")
+    
+    # طلب الملف
+    bot.reply_to(message, "📁 <b>Please send the .txt file containing cards.</b>\n\nFormat: <code>card|MM|YYYY|CVV</code> (one per line)\n\nSend /cancel to cancel.", parse_mode='HTML')
+    bot.register_next_step_handler(message, process_mass_file, user_id)
+
+def process_mass_file(message, user_id):
+    if message.text and message.text.lower() == '/cancel':
+        bot.reply_to(message, "❌ Operation cancelled.")
         return
+    
+    if not message.document:
+        bot.reply_to(message, "❌ Please send a .txt file.")
+        return
+    
     if not message.document.file_name.endswith('.txt'):
         bot.reply_to(message, "❌ Please send a .txt file.")
         return
-    sites = load_admin_sites()
-    proxies = load_user_proxies(user_id)
-    if not sites:
-        bot.reply_to(message, "❌ No sites available. Contact admin to add sites.")
-        return
-    if not proxies:
-        bot.reply_to(message, "❌ No proxies available. Add proxies first.")
-        return
-    file_info = bot.get_file(message.document.file_id)
-    downloaded_file = bot.download_file(file_info.file_path)
-    content = downloaded_file.decode('utf-8')
-    cards = extract_cc(content)
-    if not cards:
-        bot.reply_to(message, "❌ No valid cards found in file.")
-        return
-    if not is_admin(user_id):
-        checks_left = get_user_checks_left(user_id)
-        if len(cards) > checks_left:
-            bot.reply_to(message, f"⚠️ File contains {len(cards)} cards but you have {checks_left} checks left.\n\nChecking first {checks_left} cards.", parse_mode='HTML')
-            cards = cards[:checks_left]
-    max_cards = 10000 if is_admin(user_id) else 5000
-    if len(cards) > max_cards:
-        bot.reply_to(message, f"⚠️ File contains {len(cards)} cards. Limiting to first {max_cards} cards.", parse_mode='HTML')
-        cards = cards[:max_cards]
-    total_cards = len(cards)
-    user_pending_mass[user_id] = {
-        'cards': cards,
-        'total': total_cards,
-        'sites': sites,
-        'proxies': proxies,
-        'mode': None,
-        'message_id': None
-    }
-    msg = bot.reply_to(message, "📋 <b>Select mode:</b>\n\n• CHARGES ONLY: Only send charged cards\n• ALL HITS: Send charged + approved cards", reply_markup=get_mode_keyboard(), parse_mode='HTML')
-    user_pending_mass[user_id]['message_id'] = msg.message_id
+    
+    try:
+        file_info = bot.get_file(message.document.file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+        content = downloaded_file.decode('utf-8')
+        cards = extract_cc(content)
+        
+        if not cards:
+            bot.reply_to(message, "❌ No valid cards found in file.")
+            return
+        
+        sites = load_admin_sites()
+        proxies = load_user_proxies(user_id)
+        
+        if not sites:
+            bot.reply_to(message, "❌ No sites available. Contact admin to add sites.")
+            return
+        if not proxies:
+            bot.reply_to(message, "❌ No proxies available. Add proxies first.")
+            return
+        
+        # التحقق من عدد الفحوصات للمستخدم العادي
+        if not is_admin(user_id):
+            checks_left = get_user_checks_left(user_id)
+            if len(cards) > checks_left:
+                bot.reply_to(message, f"⚠️ File contains {len(cards)} cards but you have {checks_left} checks left.\n\nChecking first {checks_left} cards.", parse_mode='HTML')
+                cards = cards[:checks_left]
+        
+        max_cards = 10000 if is_admin(user_id) else 5000
+        if len(cards) > max_cards:
+            bot.reply_to(message, f"⚠️ File contains {len(cards)} cards. Limiting to first {max_cards} cards.", parse_mode='HTML')
+            cards = cards[:max_cards]
+        
+        # حفظ البيانات مؤقتاً وطلب اختيار الوضع
+        user_pending_mass[user_id] = {
+            'cards': cards,
+            'sites': sites,
+            'proxies': proxies,
+            'total': len(cards)
+        }
+        
+        bot.send_message(user_id, "📋 <b>Select mode:</b>\n\n• CHARGES ONLY: Only send charged cards\n• ALL HITS: Send charged + approved cards", reply_markup=get_mode_keyboard(), parse_mode='HTML')
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error processing file: {e}")
 
 @bot.callback_query_handler(func=lambda call: call.data in ['mode_charges', 'mode_all', 'mode_cancel'])
 def handle_mode_selection(call):
     user_id = call.from_user.id
-    if user_id not in user_pending_mass:
-        bot.answer_callback_query(call.id, "⚠️ Session expired. Please use /chk again.")
-        return
+    
     if call.data == 'mode_cancel':
-        del user_pending_mass[user_id]
+        if user_id in user_pending_mass:
+            del user_pending_mass[user_id]
         bot.edit_message_text("❌ Mass check cancelled.", chat_id=call.message.chat.id, message_id=call.message.message_id)
         bot.answer_callback_query(call.id)
         return
+    
+    if user_id not in user_pending_mass:
+        bot.answer_callback_query(call.id, "⚠️ Session expired. Please use /chk again.")
+        bot.edit_message_text("❌ Session expired. Please use /chk again.", chat_id=call.message.chat.id, message_id=call.message.message_id)
+        return
+    
     mode = "charges_only" if call.data == 'mode_charges' else "all_hits"
     pending = user_pending_mass.pop(user_id)
     cards = pending['cards']
-    total_cards = pending['total']
     sites = pending['sites']
     proxies = pending['proxies']
-    msg_id = pending['message_id']
-    bot.edit_message_text(f"🔄 Starting check for {total_cards} cards...", chat_id=call.message.chat.id, message_id=call.message.message_id)
+    total_cards = pending['total']
+    
+    # رسالة بداية الفحص
+    msg = bot.edit_message_text(f"🔄 Starting check for {total_cards} cards...\nMode: {'CHARGES ONLY' if mode == 'charges_only' else 'ALL HITS'}", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='HTML')
     bot.answer_callback_query(call.id)
-    thread = threading.Thread(target=run_mass_check, args=(user_id, cards, sites, proxies, mode, msg_id))
+    
+    # بدء الفحص في thread منفصل
+    thread = threading.Thread(target=run_mass_check, args=(user_id, cards, sites, proxies, mode, msg.message_id))
     thread.start()
 
 def run_mass_check(user_id, cards, sites, proxies, mode, message_id):
     active_scans[user_id] = {"active": True, "stop_requested": False}
+    
     all_results = {
         'charged': [],
         'approved': [],
@@ -1056,15 +1089,24 @@ def run_mass_check(user_id, cards, sites, proxies, mode, message_id):
         'checked': 0,
         'start_time': time.time()
     }
+    
     card_responses = []
+    
     for i, card in enumerate(cards):
+        # التحقق من طلب الإيقاف
         if not active_scans.get(user_id, {}).get("active", False) or active_scans.get(user_id, {}).get("stop_requested", False):
             bot.edit_message_text("🛑 <b>Mass check stopped by user.</b>", chat_id=user_id, message_id=message_id, parse_mode='HTML')
             break
+        
+        # فحص البطاقة
         res = check_card_with_retry(card, sites, proxies, max_retries=1)
         all_results['checked'] += 1
+        
+        # تحديث عدد الفحوصات للمستخدم العادي
         if not is_admin(user_id):
             increment_user_checks(user_id, 1)
+        
+        # تخزين النتيجة
         card_responses.append({
             'card': card,
             'status': res['status'],
@@ -1072,6 +1114,8 @@ def run_mass_check(user_id, cards, sites, proxies, mode, message_id):
             'price': res.get('price', '-'),
             'gateway': res.get('gateway', 'Unknown')
         })
+        
+        # إرسال Hit حسب الوضع
         if res['status'] == 'Charged':
             all_results['charged'].append(res)
             send_hit_message(user_id, res, 'Charged')
@@ -1082,11 +1126,16 @@ def run_mass_check(user_id, cards, sites, proxies, mode, message_id):
             all_results['approved'].append(res)
         else:
             all_results['dead'].append(res)
+        
+        # تحديث واجهة التقدم
         elapsed = int(time.time() - all_results['start_time'])
         hours = elapsed // 3600
         minutes = (elapsed % 3600) // 60
         seconds = elapsed % 60
+        
         gateway = all_results['charged'][0]['gateway'] if all_results['charged'] else (all_results['approved'][0]['gateway'] if all_results['approved'] else 'Unknown')
+        
+        # عرض آخر 5 نتائج
         recent_responses = ""
         for cr in card_responses[-5:]:
             if cr['status'] == 'Charged':
@@ -1097,6 +1146,7 @@ def run_mass_check(user_id, cards, sites, proxies, mode, message_id):
                 emoji = "❌"
             short_card = cr['card'][:10] + "***" + cr['card'][-4:] if len(cr['card']) > 15 else cr['card']
             recent_responses += f"{emoji} {short_card} | {cr['message'][:40]}\n"
+        
         progress_text = f"""
 <b>💠 Progress</b>
 <blockquote>💳 Total: {all_results['total']} | 💎 Charged: {len(all_results['charged'])} | ✅ Approved: {len(all_results['approved'])} | ❌ Dead: {len(all_results['dead'])}</blockquote>
@@ -1112,11 +1162,16 @@ def run_mass_check(user_id, cards, sites, proxies, mode, message_id):
             bot.edit_message_text(progress_text, chat_id=user_id, message_id=message_id, parse_mode='HTML')
         except:
             pass
+        
+        # تأخير بين الفحوصات لتجنب الحظر
         time.sleep(random.uniform(0.8, 1.2))
+    
+    # إرسال النتائج النهائية
     elapsed = int(time.time() - all_results['start_time'])
     hours = elapsed // 3600
     minutes = (elapsed % 3600) // 60
     seconds = elapsed % 60
+    
     hits_text = ""
     if all_results['charged']:
         for r in all_results['charged'][:10]:
@@ -1126,8 +1181,10 @@ def run_mass_check(user_id, cards, sites, proxies, mode, message_id):
             hits_text += f"✅ <code>{r['card']}</code> | {r.get('price', '-')}\n"
     if not hits_text:
         hits_text = "No hits found"
+    
     gateway = all_results['charged'][0]['gateway'] if all_results['charged'] else (all_results['approved'][0]['gateway'] if all_results['approved'] else 'Unknown')
     checks_left_display = get_user_checks_left(user_id) if not is_admin(user_id) else "♾️"
+    
     summary = f"""<b>━━━━━━━━━━━━━━━━━</b>
 <b>⚡ Final Results</b>
 <blockquote>💳 Total: {all_results['total']} | 💎 Charged: {len(all_results['charged'])} | ✅ Approved: {len(all_results['approved'])} | ❌ Dead: {len(all_results['dead'])}</blockquote>
@@ -1138,7 +1195,10 @@ def run_mass_check(user_id, cards, sites, proxies, mode, message_id):
 <blockquote>{hits_text}</blockquote>
 <b>━━━━━━━━━━━━━━━━━</b>
 <b>💳 Checks left: {checks_left_display}</b>"""
+    
     bot.edit_message_text(summary, chat_id=user_id, message_id=message_id, parse_mode='HTML')
+    
+    # تنظيف الفحص النشط
     if user_id in active_scans:
         del active_scans[user_id]
 
