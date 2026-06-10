@@ -7,9 +7,14 @@ import time
 import json
 import re
 import secrets
-import urllib.parse
 from datetime import datetime, timedelta
 from telethon import TelegramClient, events, Button
+from telethon.tl.types import (
+    InputInvoiceMessage, 
+    InputMediaInvoice, 
+    LabeledPrice,
+    MessageMediaInvoice
+)
 
 # ==================== إعدادات البوت ====================
 CHECKER_API_URL = 'https://apiehopf-production.up.railway.app'
@@ -759,6 +764,120 @@ async def send_hit_message(user_id, result, hit_type):
     except:
         pass
 
+# ==================== نظام الدفع بالنجوم ====================
+
+async def create_star_invoice(user_id, plan_key):
+    """إنشاء فاتورة دفع بالنجوم"""
+    plan = SUBSCRIPTION_PLANS.get(plan_key)
+    if not plan:
+        return None
+    
+    # إنشاء فاتورة باستخدام Bot API
+    # ملاحظة: Telethon لا يدعم إنشاء Invoices للنجوم مباشرة
+    # نستخدم requests للتواصل مع Bot API
+    
+    import requests
+    
+    stars_amount = plan['stars']
+    title = f"Subscription - {plan['name']}"
+    description = f"Subscribe for {plan['name']}\nDuration: {plan['name']}\nPrice: {stars_amount} stars"
+    
+    # إنشاء الفاتورة
+    invoice_params = {
+        "chat_id": user_id,
+        "title": title,
+        "description": description,
+        "payload": f"sub_{plan_key}_{user_id}_{int(time.time())}",
+        "provider_token": "",  # مش مطلوب للنجوم
+        "currency": "XTR",  # XTR = Telegram Stars
+        "prices": [{"label": plan['name'], "amount": stars_amount}],
+        "start_parameter": f"sub_{plan_key}",
+        "need_name": False,
+        "need_phone_number": False,
+        "need_email": False,
+        "send_invoice": True
+    }
+    
+    try:
+        # حفظ حالة الدفع المنتظر
+        pending_payments[user_id] = {
+            'plan_key': plan_key,
+            'stars': stars_amount,
+            'created_at': time.time()
+        }
+        
+        # إرسال الفاتورة
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendInvoice"
+        response = requests.post(url, json=invoice_params)
+        
+        if response.status_code == 200:
+            return True, response.json()
+        else:
+            print(f"Invoice error: {response.text}")
+            return False, response.text
+    except Exception as e:
+        print(f"Invoice exception: {e}")
+        return False, str(e)
+
+# قاموس للدفعات المنتظرة
+pending_payments = {}
+
+async def verify_star_payment(user_id, payload):
+    """التحقق من صحة الدفع بالنجوم"""
+    # هذا سيتم استدعاؤه عندما يرسل تيليجرام إشعار الدفع
+    # نحتاج إلى إعداد webhook أو polling للتحقق من الدفع
+    pass
+
+# ==================== معالجة الدفع بالنجوم عبر Callback ====================
+
+# ملاحظة: تيليجرام يرسل تحديث من نوع "pre_checkout_query" ثم "successful_payment"
+# Telethon لا يدعم هذه الأنواع بشكل كامل، لذلك نستخدم polling مع Bot API
+
+async def check_pending_payments():
+    """التحقق من الدفعات المعلقة"""
+    import requests
+    
+    while True:
+        try:
+            # جلب آخر التحديثات من Bot API
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset=-1&timeout=10"
+            response = requests.get(url, timeout=15)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('ok') and data.get('result'):
+                    for update in data['result']:
+                        # التحقق من وجود دفع ناجح
+                        if 'pre_checkout_query' in update:
+                            query = update['pre_checkout_query']
+                            # قبول الدفع تلقائياً
+                            accept_url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerPreCheckoutQuery"
+                            accept_data = {
+                                "pre_checkout_query_id": query['id'],
+                                "ok": True
+                            }
+                            requests.post(accept_url, json=accept_data)
+                        
+                        elif 'successful_payment' in update:
+                            payment = update['successful_payment']
+                            user_id = update['message']['chat']['id']
+                            payload = payment.get('invoice_payload', '')
+                            
+                            # استخراج معلومات الخطة من payload
+                            if payload.startswith('sub_'):
+                                parts = payload.split('_')
+                                if len(parts) >= 2:
+                                    plan_key = parts[1]
+                                    # تفعيل الاشتراك
+                                    success, expiry = activate_subscription(user_id, plan_key)
+                                    if success:
+                                        await bot.send_message(user_id, premium_emoji(f"✅ <b>Subscription Activated!</b>\n\nYour {SUBSCRIPTION_PLANS[plan_key]['name']} subscription has been activated.\n\nExpires: {datetime.fromtimestamp(expiry).strftime('%Y-%m-%d %H:%M:%S')}"), parse_mode='html')
+            
+            await asyncio.sleep(2)
+        except Exception as e:
+            print(f"Error checking payments: {e}")
+            await asyncio.sleep(5)
+
 # ==================== أوامر البوت الأساسية ====================
 
 ALLOWED_COMMANDS = ['/start', '/help', '/subscribe', '/redeem']
@@ -803,152 +922,16 @@ async def start(event):
         parse_mode='html'
     )
 
-# ==================== نظام الدفع بالنجوم ====================
-
-async def create_star_invoice(user_id, plan_key):
-    """إنشاء رابط دفع بالنجوم"""
-    plan = SUBSCRIPTION_PLANS.get(plan_key)
-    if not plan:
-        return None
-    
-    # إنشاء payload فريد للمعاملة
-    payload = f"sub_{plan_key}_{user_id}_{int(time.time())}"
-    
-    # رابط الدفع المباشر
-    # الصيغة: https://t.me/بوتك?start=payload
-    invoice_link = f"https://t.me/{(await bot.get_me()).username}?start=pay_{payload}"
-    
-    return invoice_link
-
-@bot.on(events.NewMessage(pattern='/subscribe'))
-async def subscribe_command(event):
-    user_id = event.sender_id
-    if is_user_blocked(user_id) and not is_admin(user_id):
-        await event.reply(premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
-        return
-    
-    text = """⭐ <b>SONIC SUBSCRIPTION</b>
-
-Choose your plan:
-
-├ 1 Hour - 30⭐
-├ 12 Hours - 50⭐
-├ 1 Day - 100⭐
-├ 3 Days - 250⭐
-└ 1 Week - 500⭐
-
-Click on a plan below to pay with Telegram Stars.
-
-After payment, your subscription will be activated automatically."""
-    
-    await event.reply(premium_emoji(text), buttons=get_subscription_keyboard(), parse_mode='html')
-
-@bot.on(events.CallbackQuery(pattern=b"sub_1h|sub_12h|sub_1d|sub_3d|sub_week"))
-async def handle_subscription_payment(event):
-    user_id = event.sender_id
-    data = event.data.decode('utf-8')
-    plan_key = data.split("_")[1]
-    plan = SUBSCRIPTION_PLANS.get(plan_key)
-    
-    if not plan:
-        await event.answer("Invalid plan", alert=True)
-        return
-    
-    # إنشاء رابط دفع
-    payload = f"pay_{plan_key}_{user_id}_{int(time.time())}"
-    bot_username = (await bot.get_me()).username
-    
-    # رابط الدفع (سيتم إرساله كزر)
-    pay_url = f"https://t.me/{bot_username}?start={payload}"
-    
-    # رسالة تأكيد الدفع
-    await event.edit(
-        premium_emoji(f"⭐ <b>Payment for {plan['name']}</b>\n\n"
-                      f"Amount: {plan['stars']} stars\n"
-                      f"Duration: {plan['name']}\n\n"
-                      f"Click the button below to pay with Telegram Stars.\n\n"
-                      f"After payment, your subscription will be activated automatically."),
-        buttons=[[Button.url(f"Pay {plan['stars']}⭐", pay_url)], [Button.inline("🔙 Back", b"subscribe_back")]],
-        parse_mode='html'
-    )
-    await event.answer()
-
-@bot.on(events.CallbackQuery(pattern=b"subscribe_back"))
-async def subscribe_back(event):
-    user_id = event.sender_id
-    text = """⭐ <b>SONIC SUBSCRIPTION</b>
-
-Choose your plan:
-
-├ 1 Hour - 30⭐
-├ 12 Hours - 50⭐
-├ 1 Day - 100⭐
-├ 3 Days - 250⭐
-└ 1 Week - 500⭐
-
-Click on a plan below to pay with Telegram Stars.
-
-After payment, your subscription will be activated automatically."""
-    
-    await event.edit(premium_emoji(text), buttons=get_subscription_keyboard(), parse_mode='html')
-    await event.answer()
-
-# معالجة دفع النجوم (عندما يضغط المستخدم على /start مع payload)
-@bot.on(events.NewMessage(pattern='/start pay_'))
-async def handle_star_payment_start(event):
-    user_id = event.sender_id
-    payload = event.message.text.replace('/start ', '').replace('pay_', '')
-    
-    parts = payload.split('_')
-    if len(parts) >= 2:
-        plan_key = parts[0]
-        plan = SUBSCRIPTION_PLANS.get(plan_key)
-        
-        if plan:
-            # هنا هنحتاج نتحقق من الدفع
-            # للأسف Telethon لا يدعم التحقق من دفع النجوم مباشرة
-            # بديل: نطلب من المستخدم إرسال إثبات الدفع
-            await event.reply(
-                premium_emoji(f"⭐ <b>Payment Initiated</b>\n\n"
-                              f"Please send {plan['stars']} stars to this bot.\n\n"
-                              f"After sending, your subscription will be activated within a few minutes.\n\n"
-                              f"Plan: {plan['name']}\n"
-                              f"Price: {plan['stars']} stars\n\n"
-                              f"If you don't receive activation, contact @ISoonik with payment proof."),
-                parse_mode='html'
-            )
-
-@bot.on(events.NewMessage(pattern='/start'))
-async def start_without_payload(event):
-    user_id = event.sender_id
-    if is_user_blocked(user_id) and not is_admin(user_id):
-        await event.reply(premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
-        return
-    try:
-        sender = await event.get_sender()
-        username = sender.username if sender.username else f"user_{user_id}"
-    except:
-        username = f"user_{user_id}"
-    await create_user_if_not_exists(user_id, username)
-    stats_text = await get_user_stats_text(user_id, username)
-    await event.reply(
-        premium_emoji(stats_text),
-        buttons=get_main_menu_keyboard(),
-        parse_mode='html'
-    )
-
-# ==================== باقي أوامر البوت ====================
-
 @bot.on(events.CallbackQuery)
 async def handle_menu_callback(event):
     user_id = event.sender_id
     data = event.data.decode('utf-8')
     
-    if is_user_blocked(user_id) and not is_admin(user_id) and data not in ["admin_stats", "admin_broadcast", "admin_block", "admin_unblock", "admin_set_limit", "admin_sites", "admin_view_sites", "admin_add_site", "admin_remove_site", "admin_check_sites", "admin_upload_sites", "admin_clear_sites", "admin_panel", "subscribe_back"]:
+    if is_user_blocked(user_id) and not is_admin(user_id) and data not in ["admin_stats", "admin_broadcast", "admin_block", "admin_unblock", "admin_set_limit", "admin_sites", "admin_view_sites", "admin_add_site", "admin_remove_site", "admin_check_sites", "admin_upload_sites", "admin_clear_sites", "admin_panel"]:
         await event.answer("🚫 You are banned", alert=True)
         return
     
-    if not is_admin(user_id) and not is_user_subscribed(user_id) and data not in ["show_commands", "main_menu", "sub_1h", "sub_12h", "sub_1d", "sub_3d", "sub_week", "subscribe_back"]:
+    if not is_admin(user_id) and not is_user_subscribed(user_id) and data not in ["show_commands", "main_menu", "sub_1h", "sub_12h", "sub_1d", "sub_3d", "sub_week"]:
         await event.answer("❌ Not subscribed! Use /subscribe", alert=True)
         return
     
@@ -1067,6 +1050,264 @@ Use buttons below or direct commands:
         save_admin_sites([])
         await event.edit(premium_emoji("✅ <b>All sites have been cleared!</b>"), parse_mode='html')
         await event.answer()
+    
+    elif data.startswith("sub_"):
+        plan_key = data.split("_")[1]
+        plan = SUBSCRIPTION_PLANS.get(plan_key)
+        if plan:
+            # إنشاء فاتورة دفع بالنجوم
+            success, result = await create_star_invoice(user_id, plan_key)
+            
+            if success:
+                await event.delete()
+                await event.answer()
+            else:
+                await event.edit(premium_emoji(f"❌ <b>Payment Error</b>\n\nCould not create invoice.\nError: {result[:100]}\n\nPlease try again later or contact admin."), parse_mode='html')
+                await event.answer()
+
+# ==================== أوامر الأدمن لإدارة المواقع ====================
+
+@bot.on(events.NewMessage(pattern='/mysites'))
+async def admin_mysites_command(event):
+    user_id = event.sender_id
+    if not is_admin(user_id):
+        await event.reply(premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
+        return
+    
+    sites = load_admin_sites()
+    if not sites:
+        await event.reply(premium_emoji("📋 <b>No sites found.</b>\n\nUse /addsites or /site to add sites."), parse_mode='html')
+        return
+    
+    sites_text = "\n".join([f"• {site}" for site in sites])
+    await event.reply(premium_emoji(f"📋 <b>Sites ({len(sites)}):</b>\n\n{sites_text}"), parse_mode='html')
+
+@bot.on(events.NewMessage(pattern=r'^/site\s+'))
+async def admin_add_site_command(event):
+    user_id = event.sender_id
+    if not is_admin(user_id):
+        await event.reply(premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
+        return
+    
+    args = event.message.text.split(' ', 1)
+    if len(args) < 2:
+        await event.reply(premium_emoji("❌ Usage: <code>/site https://domain.com</code>"), parse_mode='html')
+        return
+    
+    site = args[1].strip()
+    site = site.replace('https://', '').replace('http://', '').rstrip('/')
+    
+    proxies = load_user_proxies(user_id)
+    if not proxies:
+        proxies = load_admin_proxies() if os.path.exists('proxy.txt') else None
+        if not proxies:
+            await event.reply(premium_emoji("❌ No proxies available to test site."), parse_mode='html')
+            return
+    
+    status_msg = await event.reply(premium_emoji(f"🔄 Testing site: {site}..."), parse_mode='html')
+    proxy = random.choice(proxies)
+    result = await test_site(site, proxy)
+    
+    if result['status'] == 'alive':
+        current_sites = load_admin_sites()
+        if site not in current_sites:
+            new_sites = current_sites + [site]
+            save_admin_sites(new_sites)
+            await status_msg.edit(premium_emoji(f"✅ <b>Site added successfully!</b>\n\n{site}"), parse_mode='html')
+        else:
+            await status_msg.edit(premium_emoji(f"⚠️ <b>Site already exists:</b> {site}"), parse_mode='html')
+    else:
+        await status_msg.edit(premium_emoji(f"❌ <b>Could not add site!</b>\n\nSite appears to be dead or unreachable."), parse_mode='html')
+
+@bot.on(events.NewMessage(pattern=r'^/rmsite\s+'))
+async def admin_remove_site_command(event):
+    user_id = event.sender_id
+    if not is_admin(user_id):
+        await event.reply(premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
+        return
+    
+    args = event.message.text.split(' ', 1)
+    if len(args) < 2:
+        await event.reply(premium_emoji("❌ Usage: <code>/rmsite https://domain.com</code>"), parse_mode='html')
+        return
+    
+    url_to_remove = args[1].strip()
+    current_sites = load_admin_sites()
+    
+    if url_to_remove not in current_sites:
+        await event.reply(premium_emoji(f"❌ Site not found: {url_to_remove}"), parse_mode='html')
+        return
+    
+    new_sites = [site for site in current_sites if site != url_to_remove]
+    save_admin_sites(new_sites)
+    
+    await event.reply(premium_emoji(f"✅ <b>Site removed successfully!</b>\n\n{url_to_remove}"), parse_mode='html')
+
+@bot.on(events.NewMessage(pattern='/sitecheck'))
+async def admin_site_check_command(event):
+    user_id = event.sender_id
+    if not is_admin(user_id):
+        await event.reply(premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
+        return
+    
+    sites = load_admin_sites()
+    if not sites:
+        await event.reply(premium_emoji("❌ No sites to check."), parse_mode='html')
+        return
+    
+    proxies = load_user_proxies(user_id)
+    if not proxies:
+        proxies = load_admin_proxies() if os.path.exists('proxy.txt') else None
+        if not proxies:
+            await event.reply(premium_emoji("❌ No proxies available."), parse_mode='html')
+            return
+    
+    user_pending_sites[user_id] = {
+        'action': 'check',
+        'sites': sites,
+        'expires': time.time() + PENDING_TIMEOUT
+    }
+    
+    await event.reply(premium_emoji("💰 <b>Select price range to filter sites:</b>\n\nSites with cheapest product above selected range will be removed."), buttons=get_price_filter_keyboard(), parse_mode='html')
+
+@bot.on(events.NewMessage(pattern='/clearsites'))
+async def admin_clear_sites_command(event):
+    user_id = event.sender_id
+    if not is_admin(user_id):
+        await event.reply(premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
+        return
+    
+    current_sites = load_admin_sites()
+    count = len(current_sites)
+    if count == 0:
+        await event.reply(premium_emoji("❌ No sites to clear."), parse_mode='html')
+        return
+    
+    save_admin_sites([])
+    await event.reply(premium_emoji(f"✅ <b>Cleared all {count} sites!</b>"), parse_mode='html')
+
+@bot.on(events.NewMessage(pattern='/addsites'))
+async def admin_add_sites_file_command(event):
+    user_id = event.sender_id
+    if not is_admin(user_id):
+        await event.reply(premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
+        return
+    
+    if not event.reply_to_msg_id:
+        await event.reply(premium_emoji("❌ Reply to a .txt file containing sites."), parse_mode='html')
+        return
+    reply_msg = await event.get_reply_message()
+    if not reply_msg.file or not reply_msg.file.name.endswith('.txt'):
+        await event.reply(premium_emoji("❌ Reply to a .txt file."), parse_mode='html')
+        return
+    
+    file_path = await reply_msg.download_media()
+    
+    async with aiofiles.open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        content = await f.read()
+    
+    sites = [line.strip() for line in content.split('\n') if line.strip()]
+    sites = [s.replace('https://', '').replace('http://', '').rstrip('/') for s in sites]
+    
+    if not sites:
+        await event.reply(premium_emoji("❌ No valid sites found in file."), parse_mode='html')
+        os.remove(file_path)
+        return
+    
+    os.remove(file_path)
+    
+    user_pending_sites[user_id] = {
+        'action': 'add',
+        'sites': sites,
+        'expires': time.time() + PENDING_TIMEOUT
+    }
+    
+    await event.reply(premium_emoji(f"💰 <b>Select price range to filter sites:</b>\n\n{len(sites)} sites found.\nSites with cheapest product above selected range will be removed.\n\nYou have {PENDING_TIMEOUT//60} minutes to select."), buttons=get_price_filter_keyboard(), parse_mode='html')
+
+# ==================== معالجة فلتر السعر ====================
+
+@bot.on(events.CallbackQuery(pattern=b"price_[1-4]"))
+async def handle_price_filter(event):
+    user_id = event.sender_id
+    data = event.data.decode('utf-8')
+    price_key = data.split('_')[1]
+    
+    await cleanup_expired_pending()
+    
+    if user_id not in user_pending_sites:
+        await event.answer("⚠️ Session expired. Please try again.", alert=True)
+        await event.edit(premium_emoji("❌ <b>Session Expired!</b>\n\nPlease try again."), parse_mode='html')
+        return
+    
+    pending = user_pending_sites.pop(user_id)
+    action = pending['action']
+    sites = pending['sites']
+    price_range = PRICE_RANGES[price_key]
+    
+    status_msg = await event.edit(premium_emoji(f"🔄 Processing {len(sites)} sites...\nPrice filter: {price_range['name']}"), parse_mode='html')
+    
+    proxies = load_user_proxies(user_id)
+    if not proxies:
+        proxies = load_admin_proxies() if os.path.exists('proxy.txt') else None
+        if not proxies:
+            await status_msg.edit(premium_emoji("❌ No proxies available."), parse_mode='html')
+            return
+    
+    proxy = random.choice(proxies)
+    
+    await status_msg.edit(premium_emoji(f"🔄 Filtering by gateway (Shopify/Stripe only)..."), parse_mode='html')
+    
+    filtered_sites = []
+    total = len(sites)
+    
+    for i, site in enumerate(sites):
+        gateway = await get_site_gateway(site, proxy)
+        if not gateway or not any(allowed in gateway for allowed in ALLOWED_GATEWAYS):
+            continue
+        
+        if price_range["min"] > 0 or price_range["max"] < 999999:
+            min_price = await get_site_min_price(site)
+            if min_price is None or min_price <= price_range["max"]:
+                filtered_sites.append(site)
+        else:
+            filtered_sites.append(site)
+        
+        if (i + 1) % 10 == 0:
+            await status_msg.edit(premium_emoji(f"🔄 Progress: {i+1}/{total}\nValid sites: {len(filtered_sites)}"), parse_mode='html')
+    
+    if action == 'check':
+        save_admin_sites(filtered_sites)
+        result_text = f"""✅ <b>Site Check Complete!</b>
+
+📊 <b>Summary:</b>
+├ Total sites before: {len(sites)}
+├ Sites after filter: {len(filtered_sites)}
+├ Removed: {len(sites) - len(filtered_sites)}
+
+💰 <b>Filter applied:</b> {price_range['name']}
+🔌 <b>Gateway filter:</b> Shopify/Stripe only
+
+Sites have been updated with only working sites."""
+    else:
+        current_sites = load_admin_sites()
+        new_sites = [s for s in filtered_sites if s not in current_sites]
+        all_sites = list(set(current_sites + filtered_sites))
+        save_admin_sites(all_sites)
+        result_text = f"""✅ <b>Sites Added with Filters!</b>
+
+📊 <b>Summary:</b>
+├ Total sites in file: {len(sites)}
+├ Valid sites (Shopify/Stripe): {len(filtered_sites)}
+├ New sites added: {len(new_sites)}
+└ Total sites now: {len(all_sites)}
+
+💰 <b>Filter applied:</b> {price_range['name']}
+🔌 <b>Gateway filter:</b> Shopify/Stripe only
+
+Use /sitecheck to verify all sites are working."""
+    
+    await status_msg.edit(premium_emoji(result_text), parse_mode='html')
+    await event.answer()
 
 @bot.on(events.NewMessage(pattern='/help'))
 async def help_command(event):
@@ -2026,7 +2267,30 @@ async def bot_stats_command(event):
 └ ⏱️ Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
     await event.reply(premium_emoji(text), parse_mode='html')
 
-@bot.on(events.NewMessage(pattern='/redeem'))
+@bot.on(events.NewMessage(pattern='/subscribe'))
+async def subscribe_command(event):
+    user_id = event.sender_id
+    if is_user_blocked(user_id) and not is_admin(user_id):
+        await event.reply(premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        return
+    
+    text = """⭐ <b>SONIC SUBSCRIPTION</b>
+
+Choose your plan:
+
+├ 1 Hour - 30⭐
+├ 12 Hours - 50⭐
+├ 1 Day - 100⭐
+├ 3 Days - 250⭐
+└ 1 Week - 500⭐
+
+Click on a plan below to pay with Telegram Stars.
+
+After payment, your subscription will be activated automatically."""
+    
+    await event.reply(premium_emoji(text), buttons=get_subscription_keyboard(), parse_mode='html')
+
+@bot.on(events.NewMessage(pattern=r'^/redeem\s+'))
 async def redeem_command(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
@@ -2045,250 +2309,6 @@ async def redeem_command(event):
         await event.reply(premium_emoji(f"✅ <b>Subscription Activated!</b>\n\n{message}"), parse_mode='html')
     else:
         await event.reply(premium_emoji(f"❌ <b>Activation Failed!</b>\n\n{message}"), parse_mode='html')
-
-# ==================== أوامر الأدمن لإدارة المواقع ====================
-
-@bot.on(events.NewMessage(pattern='/mysites'))
-async def admin_mysites_command(event):
-    user_id = event.sender_id
-    if not is_admin(user_id):
-        await event.reply(premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
-        return
-    
-    sites = load_admin_sites()
-    if not sites:
-        await event.reply(premium_emoji("📋 <b>No sites found.</b>\n\nUse /addsites or /site to add sites."), parse_mode='html')
-        return
-    
-    sites_text = "\n".join([f"• {site}" for site in sites])
-    await event.reply(premium_emoji(f"📋 <b>Sites ({len(sites)}):</b>\n\n{sites_text}"), parse_mode='html')
-
-@bot.on(events.NewMessage(pattern=r'^/site\s+'))
-async def admin_add_site_command(event):
-    user_id = event.sender_id
-    if not is_admin(user_id):
-        await event.reply(premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
-        return
-    
-    args = event.message.text.split(' ', 1)
-    if len(args) < 2:
-        await event.reply(premium_emoji("❌ Usage: <code>/site https://domain.com</code>"), parse_mode='html')
-        return
-    
-    site = args[1].strip()
-    site = site.replace('https://', '').replace('http://', '').rstrip('/')
-    
-    proxies = load_user_proxies(user_id)
-    if not proxies:
-        proxies = load_admin_proxies() if os.path.exists('proxy.txt') else None
-        if not proxies:
-            await event.reply(premium_emoji("❌ No proxies available to test site."), parse_mode='html')
-            return
-    
-    status_msg = await event.reply(premium_emoji(f"🔄 Testing site: {site}..."), parse_mode='html')
-    proxy = random.choice(proxies)
-    result = await test_site(site, proxy)
-    
-    if result['status'] == 'alive':
-        current_sites = load_admin_sites()
-        if site not in current_sites:
-            new_sites = current_sites + [site]
-            save_admin_sites(new_sites)
-            await status_msg.edit(premium_emoji(f"✅ <b>Site added successfully!</b>\n\n{site}"), parse_mode='html')
-        else:
-            await status_msg.edit(premium_emoji(f"⚠️ <b>Site already exists:</b> {site}"), parse_mode='html')
-    else:
-        await status_msg.edit(premium_emoji(f"❌ <b>Could not add site!</b>\n\nSite appears to be dead or unreachable."), parse_mode='html')
-
-@bot.on(events.NewMessage(pattern=r'^/rmsite\s+'))
-async def admin_remove_site_command(event):
-    user_id = event.sender_id
-    if not is_admin(user_id):
-        await event.reply(premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
-        return
-    
-    args = event.message.text.split(' ', 1)
-    if len(args) < 2:
-        await event.reply(premium_emoji("❌ Usage: <code>/rmsite https://domain.com</code>"), parse_mode='html')
-        return
-    
-    url_to_remove = args[1].strip()
-    current_sites = load_admin_sites()
-    
-    if url_to_remove not in current_sites:
-        await event.reply(premium_emoji(f"❌ Site not found: {url_to_remove}"), parse_mode='html')
-        return
-    
-    new_sites = [site for site in current_sites if site != url_to_remove]
-    save_admin_sites(new_sites)
-    
-    await event.reply(premium_emoji(f"✅ <b>Site removed successfully!</b>\n\n{url_to_remove}"), parse_mode='html')
-
-@bot.on(events.NewMessage(pattern='/sitecheck'))
-async def admin_site_check_command(event):
-    user_id = event.sender_id
-    if not is_admin(user_id):
-        await event.reply(premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
-        return
-    
-    sites = load_admin_sites()
-    if not sites:
-        await event.reply(premium_emoji("❌ No sites to check."), parse_mode='html')
-        return
-    
-    proxies = load_user_proxies(user_id)
-    if not proxies:
-        proxies = load_admin_proxies() if os.path.exists('proxy.txt') else None
-        if not proxies:
-            await event.reply(premium_emoji("❌ No proxies available."), parse_mode='html')
-            return
-    
-    user_pending_sites[user_id] = {
-        'action': 'check',
-        'sites': sites,
-        'expires': time.time() + PENDING_TIMEOUT
-    }
-    
-    await event.reply(premium_emoji("💰 <b>Select price range to filter sites:</b>\n\nSites with cheapest product above selected range will be removed."), buttons=get_price_filter_keyboard(), parse_mode='html')
-
-@bot.on(events.NewMessage(pattern='/clearsites'))
-async def admin_clear_sites_command(event):
-    user_id = event.sender_id
-    if not is_admin(user_id):
-        await event.reply(premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
-        return
-    
-    current_sites = load_admin_sites()
-    count = len(current_sites)
-    if count == 0:
-        await event.reply(premium_emoji("❌ No sites to clear."), parse_mode='html')
-        return
-    
-    save_admin_sites([])
-    await event.reply(premium_emoji(f"✅ <b>Cleared all {count} sites!</b>"), parse_mode='html')
-
-@bot.on(events.NewMessage(pattern='/addsites'))
-async def admin_add_sites_file_command(event):
-    user_id = event.sender_id
-    if not is_admin(user_id):
-        await event.reply(premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
-        return
-    
-    if not event.reply_to_msg_id:
-        await event.reply(premium_emoji("❌ Reply to a .txt file containing sites."), parse_mode='html')
-        return
-    reply_msg = await event.get_reply_message()
-    if not reply_msg.file or not reply_msg.file.name.endswith('.txt'):
-        await event.reply(premium_emoji("❌ Reply to a .txt file."), parse_mode='html')
-        return
-    
-    file_path = await reply_msg.download_media()
-    
-    async with aiofiles.open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        content = await f.read()
-    
-    sites = [line.strip() for line in content.split('\n') if line.strip()]
-    sites = [s.replace('https://', '').replace('http://', '').rstrip('/') for s in sites]
-    
-    if not sites:
-        await event.reply(premium_emoji("❌ No valid sites found in file."), parse_mode='html')
-        os.remove(file_path)
-        return
-    
-    os.remove(file_path)
-    
-    user_pending_sites[user_id] = {
-        'action': 'add',
-        'sites': sites,
-        'expires': time.time() + PENDING_TIMEOUT
-    }
-    
-    await event.reply(premium_emoji(f"💰 <b>Select price range to filter sites:</b>\n\n{len(sites)} sites found.\nSites with cheapest product above selected range will be removed.\n\nYou have {PENDING_TIMEOUT//60} minutes to select."), buttons=get_price_filter_keyboard(), parse_mode='html')
-
-# ==================== معالجة فلتر السعر ====================
-
-@bot.on(events.CallbackQuery(pattern=b"price_[1-4]"))
-async def handle_price_filter(event):
-    user_id = event.sender_id
-    data = event.data.decode('utf-8')
-    price_key = data.split('_')[1]
-    
-    await cleanup_expired_pending()
-    
-    if user_id not in user_pending_sites:
-        await event.answer("⚠️ Session expired. Please try again.", alert=True)
-        await event.edit(premium_emoji("❌ <b>Session Expired!</b>\n\nPlease try again."), parse_mode='html')
-        return
-    
-    pending = user_pending_sites.pop(user_id)
-    action = pending['action']
-    sites = pending['sites']
-    price_range = PRICE_RANGES[price_key]
-    
-    status_msg = await event.edit(premium_emoji(f"🔄 Processing {len(sites)} sites...\nPrice filter: {price_range['name']}"), parse_mode='html')
-    
-    proxies = load_user_proxies(user_id)
-    if not proxies:
-        proxies = load_admin_proxies() if os.path.exists('proxy.txt') else None
-        if not proxies:
-            await status_msg.edit(premium_emoji("❌ No proxies available."), parse_mode='html')
-            return
-    
-    proxy = random.choice(proxies)
-    
-    await status_msg.edit(premium_emoji(f"🔄 Filtering by gateway (Shopify/Stripe only)..."), parse_mode='html')
-    
-    filtered_sites = []
-    total = len(sites)
-    
-    for i, site in enumerate(sites):
-        gateway = await get_site_gateway(site, proxy)
-        if not gateway or not any(allowed in gateway for allowed in ALLOWED_GATEWAYS):
-            continue
-        
-        if price_range["min"] > 0 or price_range["max"] < 999999:
-            min_price = await get_site_min_price(site)
-            if min_price is None or min_price <= price_range["max"]:
-                filtered_sites.append(site)
-        else:
-            filtered_sites.append(site)
-        
-        if (i + 1) % 10 == 0:
-            await status_msg.edit(premium_emoji(f"🔄 Progress: {i+1}/{total}\nValid sites: {len(filtered_sites)}"), parse_mode='html')
-    
-    if action == 'check':
-        save_admin_sites(filtered_sites)
-        result_text = f"""✅ <b>Site Check Complete!</b>
-
-📊 <b>Summary:</b>
-├ Total sites before: {len(sites)}
-├ Sites after filter: {len(filtered_sites)}
-├ Removed: {len(sites) - len(filtered_sites)}
-
-💰 <b>Filter applied:</b> {price_range['name']}
-🔌 <b>Gateway filter:</b> Shopify/Stripe only
-
-Sites have been updated with only working sites."""
-    else:
-        current_sites = load_admin_sites()
-        new_sites = [s for s in filtered_sites if s not in current_sites]
-        all_sites = list(set(current_sites + filtered_sites))
-        save_admin_sites(all_sites)
-        result_text = f"""✅ <b>Sites Added with Filters!</b>
-
-📊 <b>Summary:</b>
-├ Total sites in file: {len(sites)}
-├ Valid sites (Shopify/Stripe): {len(filtered_sites)}
-├ New sites added: {len(new_sites)}
-└ Total sites now: {len(all_sites)}
-
-💰 <b>Filter applied:</b> {price_range['name']}
-🔌 <b>Gateway filter:</b> Shopify/Stripe only
-
-Use /sitecheck to verify all sites are working."""
-    
-    await status_msg.edit(premium_emoji(result_text), parse_mode='html')
-    await event.answer()
 
 # ==================== أحداث الأزرار ====================
 
@@ -2372,6 +2392,12 @@ async def admin_set_limit_callback(event):
     await event.edit(premium_emoji("📈 <b>Send user ID and new limit</b>\n\nExample: <code>123456789 5000</code>\n\nTo cancel, send /cancel"), parse_mode='html')
     await event.answer()
 
+# ==================== مهمة فحص الدفعات ====================
+
+async def start_payment_checker():
+    """تشغيل مهمة فحص الدفعات"""
+    await check_pending_payments()
+
 # ==================== التشغيل ====================
 
 async def auto_add_admins():
@@ -2397,6 +2423,10 @@ async def auto_add_admins():
 async def main():
     await bot.start(bot_token=BOT_TOKEN)
     await auto_add_admins()
+    
+    # تشغيل مهمة فحص الدفعات في الخلفية
+    asyncio.create_task(start_payment_checker())
+    
     print("=" * 50)
     print("✅ SONIC BOT started successfully!")
     print("⚡ SONIC BOT")
