@@ -13,7 +13,7 @@ from telebot.types import LabeledPrice, PreCheckoutQuery, InlineKeyboardMarkup, 
 
 # ==================== إعدادات البوت ====================
 BOT_TOKEN = '8985561921:AAH26NPSH3Iin7RCpKfi1Q057X1umDjfgds'
-ADMIN_IDS = [1093032296]
+ADMIN_IDS = [1093032296,7077116674]
 CHECKER_API_URL = 'https://apiehopf-production.up.railway.app'
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
@@ -591,7 +591,7 @@ def handle_successful_payment(message):
     for admin_id in ADMIN_IDS:
         bot.send_message(admin_id, f"💎 <b>New Star Payment!</b>\n\n👤 User: {message.from_user.first_name}\n🆔 ID: <code>{user_id}</code>\n💰 Amount: {message.successful_payment.total_amount} stars", parse_mode='HTML')
 
-# ==================== أوامر البوت ====================
+# ==================== أوامر البوت الأساسية ====================
 @bot.message_handler(commands=['start'])
 def start_command(message):
     user_id = message.from_user.id
@@ -720,6 +720,7 @@ def myproxy_command(message):
             bot.send_document(user_id, f, caption=f"<b>📋 Your proxies ({len(proxies)}):</b>", parse_mode='HTML')
         os.remove(filename)
 
+# ==================== أوامر إضافة البروكسيات ====================
 @bot.message_handler(commands=['addproxy'])
 def addproxy_command(message):
     user_id = message.from_user.id
@@ -751,11 +752,18 @@ def process_addproxy(message, user_id):
             f.write(f"{proxy}\n")
     bot.reply_to(message, f"✅ <b>Proxies Added!</b>\n\nAdded {len(new_proxies)} new proxies.\nTotal proxies: {len(current_proxies) + len(new_proxies)}/{MAX_USER_PROXIES}", parse_mode='HTML')
 
-@bot.message_handler(commands=['addproxies'], content_types=['document'])
+@bot.message_handler(commands=['addproxies'])
 def addproxies_command(message):
     user_id = message.from_user.id
     if is_user_blocked(user_id) and not is_admin(user_id):
         bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>", parse_mode='HTML')
+        return
+    msg = bot.reply_to(message, "📁 <b>Send me a .txt file containing proxies (one per line).</b>\n\nExample format:\n<code>proxy1:port:user:pass\nproxy2:port:user:pass</code>\n\nSend /cancel to cancel.", parse_mode='HTML')
+    bot.register_next_step_handler(msg, process_proxy_file, user_id)
+
+def process_proxy_file(message, user_id):
+    if message.text and message.text.lower() == '/cancel':
+        bot.reply_to(message, "❌ Operation cancelled.")
         return
     if not message.document:
         bot.reply_to(message, "❌ Please send a .txt file.")
