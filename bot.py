@@ -138,6 +138,28 @@ def increment_user_checks(user_id, count=1):
     users[user_id_str]['total_checks'] = users[user_id_str].get('total_checks', 0) + count
     save_users(users)
 
+def activate_subscription(user_id, plan_key):
+    """تفعيل الاشتراك لمستخدم"""
+    plan = SUBSCRIPTION_PRICES.get(plan_key)
+    if not plan:
+        return False
+    
+    users = load_users()
+    user_id_str = str(user_id)
+    if user_id_str not in users:
+        users[user_id_str] = {}
+    
+    # حساب وقت الانتهاء
+    current_expiry = users[user_id_str].get('subscription_expiry', 0)
+    new_expiry = max(current_expiry, time.time()) + plan['seconds']
+    
+    users[user_id_str]['subscription_expiry'] = new_expiry
+    users[user_id_str]['premium'] = True
+    users[user_id_str]['check_limit'] = DEFAULT_CHECK_LIMIT
+    
+    save_users(users)
+    return True
+
 def generate_activation_code():
     return secrets.token_hex(8).upper()
 
@@ -373,6 +395,7 @@ def get_subscription_keyboard():
         [Button.inline("⭐ 1 Day - 100⭐", b"sub_1d")],
         [Button.inline("⭐ 3 Days - 250⭐", b"sub_3d")],
         [Button.inline("⭐ 1 Week - 500⭐", b"sub_week")],
+        [Button.inline("🎫 Redeem Code", b"sub_redeem")],
         [Button.inline("🔙 Back", b"main_menu")]
     ]
 
@@ -773,7 +796,7 @@ async def handle_menu_callback(event):
         await event.answer("🚫 You are banned", alert=True)
         return
     
-    if not is_admin(user_id) and not is_user_subscribed(user_id) and data not in ["show_commands", "main_menu", "sub_1h", "sub_12h", "sub_1d", "sub_3d", "sub_week"]:
+    if not is_admin(user_id) and not is_user_subscribed(user_id) and data not in ["show_commands", "main_menu", "sub_1h", "sub_12h", "sub_1d", "sub_3d", "sub_week", "sub_redeem"]:
         await event.answer("❌ Not subscribed! Use /subscribe", alert=True)
         return
     
@@ -839,7 +862,8 @@ async def handle_menu_callback(event):
         await event.answer()
     
     elif data == "admin_sites" and is_admin(user_id):
-        await event.edit(premium_emoji("🌐 <b>Site Management</b>\n\nChoose an option:"), buttons=get_admin_sites_menu(), parse_mode='html')
+        sites = load_admin_sites()
+        await event.edit(premium_emoji(f"🌐 <b>Site Management</b>\n\n📋 Total sites: {len(sites)}\n\nChoose an option:"), buttons=get_admin_sites_menu(), parse_mode='html')
         await event.answer()
     
     elif data == "admin_panel" and is_admin(user_id):
@@ -893,11 +917,27 @@ Use buttons below or direct commands:
         await event.edit(premium_emoji("✅ <b>All sites have been cleared!</b>"), parse_mode='html')
         await event.answer()
     
+    elif data == "sub_redeem":
+        await event.edit(premium_emoji("🎫 <b>Redeem Code</b>\n\nSend the activation code using:\n<code>/redeem YOUR_CODE</code>\n\nContact admin: @ISoonik"), parse_mode='html')
+        await event.answer()
+    
     elif data.startswith("sub_"):
         plan_key = data.split("_")[1]
         plan = SUBSCRIPTION_PRICES.get(plan_key)
         if plan:
-            await event.edit(premium_emoji(f"⭐ <b>Subscribe - {plan['name']}</b>\n\nPrice: {plan['stars']} stars\nDuration: {plan['name']}\n\nAfter sending stars, your subscription will be activated automatically."), parse_mode='html')
+            text = f"""⭐ <b>Subscribe - {plan['name']}</b>
+
+├ Price: {plan['stars']} ⭐ stars
+├ Duration: {plan['name']}
+└ After payment, contact admin: @ISoonik
+
+<b>How to pay:</b>
+1. Send {plan['stars']} stars to @ISoonik
+2. Forward the payment receipt
+3. Your subscription will be activated
+
+Or use activation code: /redeem CODE"""
+            await event.edit(premium_emoji(text), parse_mode='html')
             await event.answer()
 
 # ==================== أوامر الأدمن لإدارة المواقع ====================
@@ -997,7 +1037,6 @@ async def admin_site_check_command(event):
             await event.reply(premium_emoji("❌ No proxies available."), parse_mode='html')
             return
     
-    # طلب فلتر السعر
     user_pending_sites[user_id] = {
         'action': 'check',
         'sites': sites,
@@ -1091,19 +1130,16 @@ async def handle_price_filter(event):
     
     proxy = random.choice(proxies)
     
-    # تصفية حسب البوابة والسعر
     await status_msg.edit(premium_emoji(f"🔄 Filtering by gateway (Shopify/Stripe only)..."), parse_mode='html')
     
     filtered_sites = []
     total = len(sites)
     
     for i, site in enumerate(sites):
-        # فحص البوابة
         gateway = await get_site_gateway(site, proxy)
         if not gateway or not any(allowed in gateway for allowed in ALLOWED_GATEWAYS):
             continue
         
-        # فحص السعر
         if price_range["min"] > 0 or price_range["max"] < 999999:
             min_price = await get_site_min_price(site)
             if min_price is None or min_price <= price_range["max"]:
@@ -1115,7 +1151,6 @@ async def handle_price_filter(event):
             await status_msg.edit(premium_emoji(f"🔄 Progress: {i+1}/{total}\nValid sites: {len(filtered_sites)}"), parse_mode='html')
     
     if action == 'check':
-        # حفظ المواقع بعد الفلترة
         save_admin_sites(filtered_sites)
         result_text = f"""✅ <b>Site Check Complete!</b>
 
@@ -1129,7 +1164,6 @@ async def handle_price_filter(event):
 
 Sites have been updated with only working sites."""
     else:
-        # إضافة المواقع الجديدة
         current_sites = load_admin_sites()
         new_sites = [s for s in filtered_sites if s not in current_sites]
         all_sites = list(set(current_sites + filtered_sites))
@@ -2125,9 +2159,12 @@ Choose your plan:
 ├ 3 Days - 250⭐
 └ 1 Week - 500⭐
 
-Send the amount of stars to the bot based on your chosen plan.
+<b>How to subscribe:</b>
+1. Send the stars amount to @ISoonik
+2. Forward the payment receipt
+3. Your subscription will be activated
 
-After sending stars, your subscription will be activated automatically.
+Or use activation code: /redeem CODE
 
 Contact admin: @ISoonik"""
     
