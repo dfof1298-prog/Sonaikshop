@@ -7,6 +7,7 @@ import time
 import json
 import re
 import secrets
+import shutil
 from datetime import datetime
 from telethon import TelegramClient, events, Button
 import requests
@@ -50,16 +51,20 @@ user_current_check = {}
 user_pending_mass = {}
 user_pending_sites = {}
 
-# استخدام جلسة ثابتة
-SESSION_FILE = "sessions/sonic_bot"
-os.makedirs('sessions', exist_ok=True)
-for f in os.listdir('sessions'):
+# ==================== تنظيف الجلسات القديمة ====================
+SESSION_DIR = "sessions"
+os.makedirs(SESSION_DIR, exist_ok=True)
+
+# حذف جميع الجلسات القديمة
+for f in os.listdir(SESSION_DIR):
     if f.endswith('.session'):
         try:
-            os.remove(os.path.join('sessions', f))
+            os.remove(os.path.join(SESSION_DIR, f))
+            print(f"🗑️ Removed old session: {f}")
         except:
             pass
 
+SESSION_FILE = os.path.join(SESSION_DIR, "sonic_bot")
 bot = TelegramClient(SESSION_FILE, API_ID, API_HASH)
 
 # ==================== دوال الملفات ====================
@@ -224,6 +229,11 @@ async def create_user_if_not_exists(user_id, username):
             'blocked': False
         }
         save_users(users)
+        for admin in ADMIN_IDS:
+            try:
+                await bot.send_message(admin, f"🆕 <b>New user!</b>\n🆔 <code>{user_id}</code>\n👤 @{username}", parse_mode='html')
+            except:
+                pass
 
 # ==================== دوال API ====================
 def parse_proxy_url(proxy_str):
@@ -295,14 +305,32 @@ async def get_site_min_price(site, proxy):
         return None
 
 async def check_site_complete(site, proxy, price_range):
-    is_shop, gateway = await is_site_shopify(site, proxy)
-    if not is_shop:
-        return {'site': site, 'status': 'dead', 'reason': f'Not Shopify'}
-    if price_range["min"] > 0 or price_range["max"] < 999999:
-        min_price = await get_site_min_price(site, proxy)
-        if min_price is not None and min_price > price_range["max"]:
-            return {'site': site, 'status': 'dead', 'reason': f'Price ${min_price:.2f} > ${price_range["max"]}'}
-    return {'site': site, 'status': 'alive', 'reason': 'Shopify'}
+    try:
+        site = site.replace('https://', '').replace('http://', '').rstrip('/')
+        
+        # أولاً: فحص الموقع مباشرة
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
+                async with session.get(f'https://{site}', ssl=False) as resp:
+                    if resp.status not in [200, 301, 302, 307, 308]:
+                        return {'site': site, 'status': 'dead', 'reason': f'HTTP {resp.status}'}
+        except:
+            return {'site': site, 'status': 'dead', 'reason': 'Site unreachable'}
+        
+        # ثانياً: التحقق من Shopify Gateway
+        is_shop, gateway = await is_site_shopify(site, proxy)
+        if not is_shop:
+            return {'site': site, 'status': 'dead', 'reason': f'Not Shopify (Gateway: {gateway})'}
+        
+        # ثالثاً: فلتر السعر
+        if price_range["min"] > 0 or price_range["max"] < 999999:
+            min_price = await get_site_min_price(site, proxy)
+            if min_price is not None and min_price > price_range["max"]:
+                return {'site': site, 'status': 'dead', 'reason': f'Price ${min_price:.2f} > ${price_range["max"]}'}
+        
+        return {'site': site, 'status': 'alive', 'reason': f'Shopify | Gateway: {gateway}'}
+    except Exception as e:
+        return {'site': site, 'status': 'dead', 'reason': str(e)[:50]}
 
 async def check_card(card, site, proxy):
     try:
@@ -364,7 +392,7 @@ def extract_cc(text):
         cards.append(f"{card}|{month}|{year}|{cvv}")
     return cards
 
-async def send_hit_message(user_id, result, hit_type, context=None):
+async def send_hit_message(user_id, result, hit_type):
     emoji = "💎" if hit_type == 'Charged' else "✅"
     status_text = "CHARGED" if hit_type == 'Charged' else "APPROVED"
     brand, typ, lvl, bank, country, flag = await get_bin_info(result['card'].split('|')[0])
@@ -373,7 +401,7 @@ async def send_hit_message(user_id, result, hit_type, context=None):
 <blockquote>{emoji} Status: {status_text}</blockquote>
 <blockquote>💳 Card: <code>{result['card']}</code></blockquote>
 <blockquote>📝 Response: {result['message'][:150]}</blockquote>
-<blockquote>🌐 Gateway: {result.get('gateway', 'Unknown')} | 💰 {result.get('price', '-')}</blockquote>
+<blockquote>🌐 Gateway: 🔥 {result.get('gateway', 'Unknown')} | 💰 {result.get('price', '-')}</blockquote>
 <b>💠 BIN Info</b>
 <pre>BIN: {brand} - {typ} - {lvl}
 Bank: {bank}
@@ -1087,6 +1115,11 @@ async def sitecheck(event):
     if not sites:
         await event.reply("❌ No sites")
         return
+    proxies = load_user_proxies(event.sender_id)
+    if not proxies:
+        await event.reply("❌ No proxies available. Add proxies first.")
+        return
+    
     user_pending_sites[event.sender_id] = {'action': 'check', 'sites': sites}
     await event.reply("💰 Select price filter:", buttons=get_price_kb())
 
@@ -1096,12 +1129,12 @@ async def price_filter(event):
     if data == "price_cancel":
         if user_id in user_pending_sites:
             del user_pending_sites[user_id]
-        await event.edit("Cancelled")
+        await event.edit("❌ Cancelled")
         return
     price_key = data.split("_")[1]
     pending = user_pending_sites.pop(user_id, None)
     if not pending:
-        await event.edit("Session expired")
+        await event.edit("❌ Session expired")
         return
     action = pending['action']
     sites = pending['sites']
@@ -1110,29 +1143,60 @@ async def price_filter(event):
     if not proxies:
         await event.edit("❌ No proxies")
         return
-    await event.edit(f"🔍 Checking {len(sites)} sites...")
+    
+    await event.edit(f"🔍 Checking {len(sites)} sites with filter: {price_range['name']}...\n\n⏳ Please wait...")
+    
     valid = []
     invalid = []
-    proxy = random.choice(proxies)
-    for site in sites:
-        is_shop, _ = await is_site_shopify(site, proxy)
-        if not is_shop:
-            invalid.append(site)
-            continue
-        if price_range["min"] > 0 or price_range["max"] < 999999:
-            price = await get_site_min_price(site, proxy)
-            if price is not None and price > price_range["max"]:
-                invalid.append(site)
-                continue
-        valid.append(site)
+    total = len(sites)
+    
+    for i, site in enumerate(sites):
+        proxy = random.choice(proxies)
+        result = await check_site_complete(site, proxy, price_range)
+        
+        if result['status'] == 'alive':
+            valid.append(site)
+        else:
+            invalid.append({'site': site, 'reason': result['reason']})
+        
+        # تحديث التقدم كل 5 مواقع
+        if (i + 1) % 5 == 0 or (i + 1) == total:
+            await event.edit(f"🔍 Progress: {i+1}/{total}\n✅ Valid: {len(valid)}\n❌ Invalid: {len(invalid)}")
+        await asyncio.sleep(0.1)
+    
     if action == 'check':
         save_sites(valid)
-        await event.edit(f"✅ Done!\nTotal: {len(sites)}\n✅ Valid: {len(valid)}\n❌ Removed: {len(invalid)}\n💰 Filter: {price_range['name']}")
+        result_text = f"""✅ <b>SONIC Site Check Complete!</b>
+
+📊 Total sites before: {total}
+✅ Valid Shopify sites: {len(valid)}
+❌ Removed sites: {len(invalid)}
+
+💰 Filter applied: {price_range['name']}
+🔌 Gateway: Shopify only"""
+
+        if invalid:
+            result_text += f"\n\n<b>❌ Removed sites (first 10):</b>\n"
+            for inv in invalid[:10]:
+                result_text += f"• {inv['site'][:40]} - {inv['reason']}\n"
+            if len(invalid) > 10:
+                result_text += f"• ... and {len(invalid) - 10} more"
     else:
         current = load_sites()
-        new = [s for s in valid if s not in current]
-        save_sites(list(set(current + valid)))
-        await event.edit(f"✅ Added {len(new)} Shopify sites\nTotal: {len(load_sites())}")
+        new_sites = [s for s in valid if s not in current]
+        all_sites = list(set(current + valid))
+        save_sites(all_sites)
+        result_text = f"""✅ <b>SONIC Sites Added with Filters!</b>
+
+📊 Total sites in file: {total}
+✅ Valid Shopify sites: {len(valid)}
+📝 New sites added: {len(new_sites)}
+🌐 Total sites now: {len(all_sites)}
+
+💰 Filter applied: {price_range['name']}
+🔌 Gateway: Shopify only"""
+    
+    await event.edit(result_text, parse_mode='html', buttons=get_admin_sites_kb())
 
 async def mysites(event):
     if not is_admin(event.sender_id):
@@ -1150,7 +1214,7 @@ async def handle_menu_callback(event):
     user_id = event.sender_id
     data = event.data.decode()
     if data == "show_commands":
-        txt = """<b>📋 COMMANDS</b>
+        txt = """<b>📋 SONIC COMMANDS</b>
 ├ /start - Menu
 ├ /help - Help
 ├ /profile - Profile
@@ -1229,6 +1293,10 @@ async def admin_callback(event):
         if not sites:
             await event.edit("❌ No sites", buttons=get_admin_sites_kb())
         else:
+            proxies = load_user_proxies(user_id)
+            if not proxies:
+                await event.edit("❌ No proxies available. Add proxies first.", buttons=get_admin_sites_kb())
+                return
             user_pending_sites[user_id] = {'action': 'check', 'sites': sites}
             await event.edit("💰 Select price filter:", buttons=get_price_kb())
     elif data == "admin_clear_sites":
@@ -1368,10 +1436,11 @@ async def main():
     bot.add_event_handler(price_filter, events.CallbackQuery(pattern=b"price_"))
     
     print("=" * 50)
-    print("✅ SONIC BOT STARTED (Telethon - Fixed)")
+    print("✅ SONIC BOT STARTED SUCCESSFULLY!")
     print(f"👑 Admins: {ADMIN_IDS}")
     print(f"⭐ Plans: {len(STAR_PRICES)}")
     print(f"📊 Max cards per combo: {MAX_CARDS_PER_COMBO}")
+    print(f"🌐 Sites: {len(load_sites())}")
     print("=" * 50)
     
     await bot.run_until_disconnected()
