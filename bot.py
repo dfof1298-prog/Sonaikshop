@@ -23,7 +23,7 @@ ADMIN_IDS = [1093032296, 7077116674]
 
 # قناة المالك للإشعارات
 OWNER_CHANNEL = 'https://t.me/ReGict7'
-OWNER_CHANNEL_ID = -1002427581270  # ضع الـ Channel ID الصحيح هنا بعد ما تجيبه
+OWNER_CHANNEL_ID = -2635018188  # ضع الـ Channel ID الصحيح هنا بعد ما تجيبه
 
 # إعدادات الاشتراك الزمني بالنجوم
 STAR_PRICES = {
