@@ -16,7 +16,7 @@ CHECKER_API_URL = 'https://apiehopf-production.up.railway.app'
 
 API_ID = 38208016
 API_HASH = '0d52125034b6a0d0dac3e71b40cea032'
-BOT_TOKEN = '8745535350:AAGhEkWRUU5dv6q2g1lMeqSc8c4TfyLRd2k'
+BOT_TOKEN = '8985561921:AAH26NPSH3Iin7RCpKfi1Q057X1umDjfgds'
 ADMIN_IDS = [1093032296,7077116674]
 
 # إعدادات الاشتراك الزمني بالنجوم
