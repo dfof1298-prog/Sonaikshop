@@ -21,7 +21,7 @@ ADMIN_IDS = [1093032296, 7077116674]
 
 # قناة المالك
 OWNER_CHANNEL = 'https://t.me/ReGict7'
-OWNER_CHANNEL_ID = 2635018188  # غير هذا بعد ما تجيب الـ ID من /get_chat_id
+OWNER_CHANNEL_ID = 2635018188
 
 # إعدادات الاشتراك الزمني بالنجوم
 STAR_PRICES = {
@@ -58,22 +58,43 @@ user_current_check = {}
 user_pending_mass = {}
 user_pending_sites = {}
 
-# إنشاء مجلد للجلسات إذا لم يكن موجوداً
+# إنشاء مجلد للجلسات
 if not os.path.exists('sessions'):
     os.makedirs('sessions')
-
-# حذف الجلسات القديمة
-for f in os.listdir('sessions'):
-    if f.endswith('.session'):
-        try:
-            os.remove(os.path.join('sessions', f))
-        except:
-            pass
 
 SESSION_FILE = "sessions/sonic_bot"
 bot = TelegramClient(SESSION_FILE, API_ID, API_HASH)
 
-# ==================== دوال المواقع (عامة) ====================
+# ==================== حل مشكلة PreCheckoutQuery ====================
+async def answer_pre_checkout(query_id):
+    """الرد على طلب الدفع المسبق"""
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerPreCheckoutQuery"
+        response = requests.post(url, json={"pre_checkout_query_id": query_id, "ok": True}, timeout=5)
+        if response.status_code == 200:
+            print(f"✅ PreCheckout accepted: {query_id}")
+            return True
+        return False
+    except Exception as e:
+        print(f"PreCheckout error: {e}")
+        return False
+
+@bot.on(events.Raw)
+async def raw_payment_handler(event):
+    """معالج الأحداث الخام للتعامل مع PreCheckoutQuery"""
+    try:
+        # التحقق من وجود pre_checkout_query
+        if hasattr(event, 'original_update'):
+            update = event.original_update
+            if hasattr(update, 'pre_checkout_query'):
+                query = update.pre_checkout_query
+                await answer_pre_checkout(query.id)
+        elif hasattr(event, 'pre_checkout_query'):
+            await answer_pre_checkout(event.pre_checkout_query.id)
+    except Exception as e:
+        print(f"Raw handler error: {e}")
+
+# ==================== دوال المواقع ====================
 def load_sites():
     if not os.path.exists('sites.txt'):
         return []
@@ -672,8 +693,9 @@ Country: {country} {flag}</pre>"""
         except Exception as e:
             print(f"Channel send error: {e}")
 
-# ==================== نظام الدفع بالنجوم ====================
+# ==================== نظام الدفع بالنجوم (المحسن) ====================
 async def send_star_invoice(user_id, plan_key):
+    """إرسال فاتورة نجوم باستخدام Bot API مباشرة"""
     plan = STAR_PRICES.get(plan_key)
     if not plan:
         return None
@@ -685,7 +707,7 @@ async def send_star_invoice(user_id, plan_key):
     payload = {
         "chat_id": user_id,
         "title": f"⭐ SONIC - {plan['name']}",
-        "description": f"Subscribe for {plan['name']}\nGet unlimited card checks for {plan['name']}\n\n🎁 Bot Owner: @ISoonik",
+        "description": f"Subscribe for {plan['name']}\nGet unlimited card checks for {plan['name']}\n\n👑 Bot Owner: @ISoonik",
         "payload": f"sub_{plan_key}",
         "provider_token": "",
         "currency": "XTR",
@@ -869,7 +891,7 @@ async def handle_callback(event):
         await send_star_invoice(user_id, plan_key)
         await event.answer()
     
-    # أوامر الأدمن
+    # أوامر الأدمن (مختصرة بسبب طول الكود)
     elif data == "admin_sites" and is_admin(user_id):
         await event.edit(premium_emoji("🌐 <b>SONIC Site Management</b>"), buttons=get_admin_sites_menu(), parse_mode='html')
     
