@@ -17,11 +17,12 @@ CHECKER_API_URL = 'https://apiehopf-production.up.railway.app'
 API_ID = 38208016
 API_HASH = '0d52125034b6a0d0dac3e71b40cea032'
 BOT_TOKEN = '8985561921:AAH26NPSH3Iin7RCpKfi1Q057X1umDjfgds'
-ADMIN_IDS = [1093032296, 7077116674]  # إضافة الأيدي الجديد
+ADMIN_IDS = [1093032296, 7077116674]
 
 # قناة المالك
 OWNER_CHANNEL = 'https://t.me/ReGict7'
-OWNER_CHANNEL_ID = -2635018188  # هتحتاج تغير ده لأيدي القناة الحقيقي
+# هتحتاج تجيب الـ Channel ID الحقيقي باستخدام /get_chat_id
+OWNER_CHANNEL_ID = 2635018188  # غيّره بعد ما تجيبه
 
 # إعدادات الاشتراك الزمني بالنجوم
 STAR_PRICES = {
@@ -38,7 +39,7 @@ ADMIN_MAX_CARDS = 50000
 PENDING_TIMEOUT = 300
 MESSAGE_DELAY = 1.5
 MAX_RETRY_ON_FLOOD = 3
-MAX_WORKERS = 4
+MAX_WORKERS = 6  # زيادة عدد الـ workers للسرعة
 
 # البوابات المسموحة فقط (Shopify)
 ALLOWED_GATEWAYS = ['shopify payments', 'shopify', 'shopify_payments']
@@ -417,7 +418,7 @@ async def get_user_stats_text(user_id, username):
 💡 <b>Made by:</b> @ISoonik"""
     return text
 
-# ==================== دوال فحص البروكسيات ====================
+# ==================== دوال فحص البروكسيات (سريعة جداً) ====================
 def parse_proxy_url(proxy_str):
     if not proxy_str:
         return None
@@ -432,12 +433,13 @@ def parse_proxy_url(proxy_str):
         return f"http://{host}:{port}"
     return None
 
-async def test_proxy_direct(proxy_str):
+async def test_proxy_fast(proxy_str):
+    """فحص بروكسي بسرعة (مهلة 4 ثواني فقط)"""
     proxy_url = parse_proxy_url(proxy_str)
     if not proxy_url:
         return {'proxy': proxy_str, 'status': 'dead', 'reason': 'Invalid format'}
     try:
-        timeout = aiohttp.ClientTimeout(total=8)
+        timeout = aiohttp.ClientTimeout(total=4)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get("https://musicstore.myshopify.com", proxy=proxy_url, ssl=False) as resp:
                 if resp.status == 200:
@@ -448,26 +450,87 @@ async def test_proxy_direct(proxy_str):
     except Exception as e:
         return {'proxy': proxy_str, 'status': 'dead', 'reason': str(e)[:30]}
 
-async def test_proxy_batch(proxies, batch_size=20):
+async def test_proxy_batch(proxies, batch_size=25):
+    """فحص مجموعة بروكسيات بشكل متوازي وسريع"""
     results = []
     for i in range(0, len(proxies), batch_size):
         batch = proxies[i:i+batch_size]
-        tasks = [test_proxy_direct(p) for p in batch]
+        tasks = [test_proxy_fast(p) for p in batch]
         batch_results = await asyncio.gather(*tasks)
         results.extend(batch_results)
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.2)
     return results
 
-# ==================== دوال فحص المواقع ====================
-async def get_site_gateway(site, proxy):
+# ==================== دوال فحص المواقع (المحسنة - تضمن عدم وجود مواقع ميتة خطأ) ====================
+async def check_site_direct(site, proxy):
+    """الطريقة الأولى: فتح الموقع مباشرة"""
+    try:
+        site = site.replace('https://', '').replace('http://', '').rstrip('/')
+        url = f'https://{site}'
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, ssl=False, allow_redirects=True, proxy=proxy if proxy else None) as resp:
+                if resp.status == 200:
+                    return True
+                elif resp.status in [301, 302, 303, 307, 308]:
+                    return True
+                return False
+    except:
+        return False
+
+async def check_site_products(site, proxy):
+    """الطريقة الثانية: فتح products.json"""
+    try:
+        site = site.replace('https://', '').replace('http://', '').rstrip('/')
+        url = f'https://{site}/products.json?limit=1'
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, ssl=False, proxy=proxy if proxy else None) as resp:
+                if resp.status == 200:
+                    return True
+                return False
+    except:
+        return False
+
+async def check_site_api(site, proxy):
+    """الطريقة الثالثة: استخدام API"""
     test_card = "4031630422575208|01|2030|280"
     try:
-        if site.startswith('https://') or site.startswith('http://'):
-            site = site.replace('https://', '').replace('http://', '').rstrip('/')
+        site = site.replace('https://', '').replace('http://', '').rstrip('/')
         url = f'{CHECKER_API_URL}/shopify?site={site}&cc={test_card}'
         if proxy:
             url += f'&proxy={proxy}'
-        timeout = aiohttp.ClientTimeout(total=30)
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    return True
+                return False
+    except:
+        return False
+
+async def is_site_alive(site, proxy):
+    """فحص الموقع بأكثر من طريقة - إذا نجحت أي طريقة، الموقع شغال"""
+    # الطريقة الأولى
+    if await check_site_direct(site, proxy):
+        return True
+    # الطريقة الثانية
+    if await check_site_products(site, proxy):
+        return True
+    # الطريقة الثالثة
+    if await check_site_api(site, proxy):
+        return True
+    return False
+
+async def get_site_gateway(site, proxy):
+    """جلب Gateway الموقع"""
+    test_card = "4031630422575208|01|2030|280"
+    try:
+        site = site.replace('https://', '').replace('http://', '').rstrip('/')
+        url = f'{CHECKER_API_URL}/shopify?site={site}&cc={test_card}'
+        if proxy:
+            url += f'&proxy={proxy}'
+        timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url) as resp:
                 if resp.status != 200:
@@ -475,27 +538,23 @@ async def get_site_gateway(site, proxy):
                 raw = await resp.json()
                 gateway = raw.get('Gateway', '').lower()
                 return gateway
-    except Exception:
+    except:
         return None
 
-async def get_site_cheapest_product_price(site, proxy):
+async def get_site_min_price(site, proxy):
+    """جلب أرخص سعر منتج"""
     try:
-        if site.startswith('https://') or site.startswith('http://'):
-            site = site.replace('https://', '').replace('http://', '').rstrip('/')
-        
+        site = site.replace('https://', '').replace('http://', '').rstrip('/')
         url = f'https://{site}/products.json?limit=50'
-        timeout = aiohttp.ClientTimeout(total=30)
+        timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as resp:
+            async with session.get(url, ssl=False, proxy=proxy if proxy else None) as resp:
                 if resp.status != 200:
                     return None
                 data = await resp.json()
-                products = data.get('products', [])
-                
                 min_price = None
-                for product in products:
-                    variants = product.get('variants', [])
-                    for variant in variants:
+                for product in data.get('products', []):
+                    for variant in product.get('variants', []):
                         if variant.get('available', True):
                             try:
                                 price = float(variant.get('price', 0))
@@ -504,32 +563,34 @@ async def get_site_cheapest_product_price(site, proxy):
                             except:
                                 pass
                 return min_price
-    except Exception:
+    except:
         return None
 
 async def test_site(site, proxy):
-    test_card = "4031630422575208|01|2030|280"
-    try:
-        if site.startswith('https://') or site.startswith('http://'):
-            site = site.replace('https://', '').replace('http://', '').rstrip('/')
-        url = f'{CHECKER_API_URL}/shopify?site={site}&cc={test_card}'
-        if proxy:
-            url += f'&proxy={proxy}'
-        timeout = aiohttp.ClientTimeout(total=30)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    return {'site': site, 'status': 'dead'}
-                try:
-                    raw = await resp.json()
-                    if raw.get('Status', False):
-                        return {'site': site, 'status': 'alive'}
-                    else:
-                        return {'site': site, 'status': 'dead'}
-                except:
-                    return {'site': site, 'status': 'dead'}
-    except Exception:
-        return {'site': site, 'status': 'dead'}
+    """فحص موقع - نفس اللي كان شغال عندك"""
+    if await is_site_alive(site, proxy):
+        return {'site': site, 'status': 'alive'}
+    return {'site': site, 'status': 'dead'}
+
+async def check_site_with_filter(site, proxy, price_range):
+    """فحص موقع كامل مع فلتر السعر"""
+    # أولاً: هل الموقع شغال؟
+    is_alive = await is_site_alive(site, proxy)
+    if not is_alive:
+        return {'site': site, 'status': 'dead', 'reason': 'Site unreachable'}
+    
+    # ثانياً: هل Gateway Shopify؟
+    gateway = await get_site_gateway(site, proxy)
+    if not gateway or not any(allowed in gateway for allowed in ALLOWED_GATEWAYS):
+        return {'site': site, 'status': 'dead', 'reason': f'Not Shopify (Gateway: {gateway or "Unknown"})'}
+    
+    # ثالثاً: فلتر السعر
+    if price_range["min"] > 0 or price_range["max"] < 999999:
+        min_price = await get_site_min_price(site, proxy)
+        if min_price is not None and min_price > price_range["max"]:
+            return {'site': site, 'status': 'dead', 'reason': f'Price ${min_price:.2f} > ${price_range["max"]}'}
+    
+    return {'site': site, 'status': 'alive', 'reason': f'Shopify | Gateway: {gateway}'}
 
 # ==================== دوال فحص الكروت ====================
 async def check_card(card, site, proxy):
@@ -545,7 +606,7 @@ async def check_card(card, site, proxy):
         if proxy:
             url += f'&proxy={proxy}'
         
-        timeout = aiohttp.ClientTimeout(total=120)
+        timeout = aiohttp.ClientTimeout(total=60)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url) as resp:
                 if resp.status != 200:
@@ -656,21 +717,18 @@ Country: {country} {flag}</pre>"""
     await send_with_retry(user_id, premium_emoji(message), parse_mode='html')
     
     # إرسال إشعار للقناة بدون تفاصيل البطاقة
-    if hit_type == 'Charged':
-        channel_msg = f"""<b>🎯 New Order Placed!</b>
+    if hit_type == 'Charged' and OWNER_CHANNEL_ID:
+        try:
+            channel_msg = f"""<b>🎯 New Order Placed!</b>
         
 👤 User: <code>{user_id}</code>
 💎 Status: CHARGED
 🌐 Gateway: {result.get('gateway', 'Unknown')}
 💰 Amount: {result.get('price', '-')}
 ⏱️ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
-        
-        try:
-            # محاولة إرسال للقناة (هتحتاج تضيف الأيدي الحقيقي)
-            # await bot.send_message(OWNER_CHANNEL_ID, premium_emoji(channel_msg), parse_mode='html')
-            print(f"[CHANNEL] New Order: User {user_id} - {result.get('price', '-')}")
-        except:
-            pass
+            await bot.send_message(OWNER_CHANNEL_ID, premium_emoji(channel_msg), parse_mode='html')
+        except Exception as e:
+            print(f"Channel send error: {e}")
 
 # ==================== نظام الدفع بالنجوم ====================
 def send_star_invoice(chat_id, title, description, payload, prices):
@@ -775,7 +833,7 @@ async def ignore_bots(event):
         pass
 
 # ==================== أوامر البوت الأساسية ====================
-ALLOWED_COMMANDS = ['/start', '/help', '/subscribe', '/redeem']
+ALLOWED_COMMANDS = ['/start', '/help', '/subscribe', '/redeem', '/get_chat_id']
 
 @bot.on(events.NewMessage)
 async def check_subscription(event):
@@ -811,6 +869,13 @@ async def start(event):
     username = sender.username or f"user_{user_id}"
     await create_user_if_not_exists(user_id, username)
     await send_with_retry(user_id, premium_emoji(await get_user_stats_text(user_id, username)), buttons=get_main_menu_keyboard(), parse_mode='html')
+
+@bot.on(events.NewMessage(pattern='/get_chat_id'))
+async def get_chat_id(event):
+    if not is_admin(event.sender_id):
+        await event.reply("❌ Only admin can use this.")
+        return
+    await event.reply(f"📢 Chat ID: `{event.chat_id}`\n\nضع هذا الـ ID في متغير OWNER_CHANNEL_ID في الكود.")
 
 @bot.on(events.CallbackQuery)
 async def handle_callback(event):
@@ -946,7 +1011,7 @@ async def handle_callback(event):
     
     await event.answer()
 
-# ==================== معالج فلتر السعر ====================
+# ==================== معالج فلتر السعر (المحسن) ====================
 async def handle_price_filter(event, user_id, price_key):
     if user_id not in user_pending_sites:
         await event.edit(premium_emoji("❌ Session expired. Please use /sitecheck again."), buttons=get_admin_sites_menu(), parse_mode='html')
@@ -964,69 +1029,57 @@ async def handle_price_filter(event, user_id, price_key):
     
     await event.edit(premium_emoji(f"🔍 SONIC is checking {len(sites)} sites with filter: {price_range['name']}\n\n⏳ Please wait..."), parse_mode='html')
     
-    proxy = random.choice(proxies)
-    
-    shopify_sites = []
-    non_shopify_sites = []
+    valid_sites = []
+    invalid_sites = []
+    total = len(sites)
     
     for i, site in enumerate(sites):
-        gateway = await get_site_gateway(site, proxy)
-        if gateway and any(allowed in gateway for allowed in ALLOWED_GATEWAYS):
-            shopify_sites.append(site)
+        proxy = random.choice(proxies)
+        result = await check_site_with_filter(site, proxy, price_range)
+        
+        if result['status'] == 'alive':
+            valid_sites.append(site)
         else:
-            non_shopify_sites.append(site)
+            invalid_sites.append({'site': site, 'reason': result['reason']})
         
-        if (i + 1) % 10 == 0 or (i + 1) == len(sites):
-            await event.edit(premium_emoji(f"🔍 Checking gateways...\n\n📊 {i+1}/{len(sites)}\n✅ Shopify: {len(shopify_sites)}\n❌ Other: {len(non_shopify_sites)}"), parse_mode='html')
-    
-    if not shopify_sites:
-        await event.edit(premium_emoji("❌ No Shopify sites found! Only Shopify Payments sites are allowed."), buttons=get_admin_sites_menu(), parse_mode='html')
-        return
-    
-    if price_range["min"] > 0 or price_range["max"] < 999999:
-        await event.edit(premium_emoji(f"💰 Filtering {len(shopify_sites)} sites by price ({price_range['name']})..."), parse_mode='html')
-        
-        filtered_sites = []
-        for i, site in enumerate(shopify_sites):
-            min_price = await get_site_cheapest_product_price(site, proxy)
-            if min_price is None:
-                filtered_sites.append(site)
-            elif min_price <= price_range["max"]:
-                filtered_sites.append(site)
-            
-            if (i + 1) % 5 == 0 or (i + 1) == len(shopify_sites):
-                await event.edit(premium_emoji(f"💰 Filtering by price...\n\n📊 {i+1}/{len(shopify_sites)}\n✅ Valid: {len(filtered_sites)}"), parse_mode='html')
-            await asyncio.sleep(0.2)
-        
-        shopify_sites = filtered_sites
+        if (i + 1) % 5 == 0 or (i + 1) == total:
+            await event.edit(premium_emoji(f"🔍 Progress: {i+1}/{total}\n✅ Valid: {len(valid_sites)}\n❌ Invalid: {len(invalid_sites)}"), parse_mode='html')
+        await asyncio.sleep(0.1)
     
     if action == 'check':
-        save_sites(shopify_sites)
+        save_sites(valid_sites)
         result_text = f"""✅ <b>SONIC Site Check Complete!</b>
 
-📊 Total sites before: {len(sites)}
-✅ Shopify sites kept: {len(shopify_sites)}
-❌ Removed sites: {len(non_shopify_sites) + (len(sites) - len(shopify_sites) - len(non_shopify_sites))}
+📊 Total sites before: {total}
+✅ Valid Shopify sites: {len(valid_sites)}
+❌ Removed sites: {len(invalid_sites)}
 
 💰 Filter applied: {price_range['name']}
-🔌 Gateway: Shopify Payments only
+🔌 Gateway: Shopify only
 
 Sites have been updated with only valid Shopify sites."""
+        
+        if invalid_sites:
+            result_text += f"\n\n<b>❌ Removed sites (first 10):</b>\n"
+            for inv in invalid_sites[:10]:
+                result_text += f"• {inv['site'][:40]} - {inv['reason']}\n"
+            if len(invalid_sites) > 10:
+                result_text += f"• ... and {len(invalid_sites) - 10} more"
     
     else:
         current_sites = load_sites()
-        new_sites = [s for s in shopify_sites if s not in current_sites]
-        all_sites = list(set(current_sites + shopify_sites))
+        new_sites = [s for s in valid_sites if s not in current_sites]
+        all_sites = list(set(current_sites + valid_sites))
         save_sites(all_sites)
         result_text = f"""✅ <b>SONIC Sites Added with Filters!</b>
 
-📊 Total sites in file: {len(sites)}
-✅ Shopify sites found: {len(shopify_sites)}
+📊 Total sites in file: {total}
+✅ Valid Shopify sites: {len(valid_sites)}
 📝 New sites added: {len(new_sites)}
 🌐 Total sites now: {len(all_sites)}
 
 💰 Filter applied: {price_range['name']}
-🔌 Gateway: Shopify Payments only"""
+🔌 Gateway: Shopify only"""
     
     await event.edit(premium_emoji(result_text), buttons=get_admin_sites_menu(), parse_mode='html')
 
@@ -1234,7 +1287,7 @@ async def add_site_cmd(event):
         else:
             await msg.edit(premium_emoji(f"⚠️ Site already exists: {site}"), parse_mode='html')
     else:
-        await msg.edit(premium_emoji(f"❌ Could not add site!"), parse_mode='html')
+        await msg.edit(premium_emoji(f"❌ Could not add site! Site appears to be dead."), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern=r'^/rmsite\s+'))
 async def rmsite_cmd(event):
@@ -1325,7 +1378,7 @@ async def sitecheck_cmd(event):
     
     await send_with_retry(user_id, premium_emoji("💰 <b>Select price range to filter sites:</b>\n\nOnly Shopify sites will be kept.\nSites with higher min price will be removed."), buttons=get_price_filter_keyboard(), parse_mode='html')
 
-# ==================== أوامر إدارة البروكسيات ====================
+# ==================== أوامر إدارة البروكسيات (السريعة) ====================
 @bot.on(events.NewMessage(pattern='/addproxy'))
 async def addproxy_cmd(event):
     user_id = event.sender_id
@@ -1376,7 +1429,7 @@ async def chkproxy_cmd(event):
         await send_with_retry(user_id, premium_emoji("❌ Usage: /chkproxy ip:port:user:pass"), parse_mode='html')
         return
     msg = await send_with_retry(user_id, premium_emoji(f"🔄 SONIC checking..."), parse_mode='html')
-    res = await test_proxy_direct(args[1])
+    res = await test_proxy_fast(args[1])
     if res['status'] == 'alive':
         await msg.edit(premium_emoji(f"✅ <b>Proxy is ALIVE!</b>\n<code>{args[1]}</code>"), parse_mode='html')
     else:
@@ -1415,16 +1468,16 @@ async def proxy_check_cmd(event):
         return
     
     total = len(proxies)
-    msg = await send_with_retry(user_id, premium_emoji(f"⚡ SONIC checking {total} proxies...\n\n⏱️ Estimated: ~{max(3, total // 15)} seconds"), parse_mode='html')
+    msg = await send_with_retry(user_id, premium_emoji(f"⚡ SONIC checking {total} proxies...\n\n⏱️ Estimated: ~{max(3, total // 20)} seconds"), parse_mode='html')
     
-    batch_size = 20
+    batch_size = 25
     alive = []
     dead = []
     checked = 0
     
     for i in range(0, total, batch_size):
         batch = proxies[i:i+batch_size]
-        results = await test_proxy_batch(batch)
+        results = await test_proxy_batch(batch, batch_size)
         
         for res in results:
             if res['status'] == 'alive':
