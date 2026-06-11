@@ -7,6 +7,7 @@ import time
 import json
 import re
 import secrets
+import requests
 from datetime import datetime
 from telethon import TelegramClient, events, Button
 
@@ -16,7 +17,13 @@ CHECKER_API_URL = 'https://apiehopf-production.up.railway.app'
 API_ID = 38208016
 API_HASH = '0d52125034b6a0d0dac3e71b40cea032'
 BOT_TOKEN = '8985561921:AAH26NPSH3Iin7RCpKfi1Q057X1umDjfgds'
-ADMIN_IDS = [1093032296]
+
+# المالكين (1093032296 و 7077116674)
+ADMIN_IDS = [1093032296, 7077116674]
+
+# قناة المالك للإشعارات
+OWNER_CHANNEL = 'https://t.me/ReGict7'
+OWNER_CHANNEL_ID = -1002427581270  # ضع الـ Channel ID الصحيح هنا بعد ما تجيبه
 
 # إعدادات الاشتراك الزمني بالنجوم
 STAR_PRICES = {
@@ -130,14 +137,14 @@ def get_user_subscription(user_id):
 
 def get_user_time_left(user_id):
     if is_admin(user_id):
-        return "Unlimited"
+        return "♾️ Unlimited"
     is_active, expiry = get_user_subscription(user_id)
     if is_active:
         remaining = int(expiry - time.time())
         hours = remaining // 3600
         minutes = (remaining % 3600) // 60
         return f"{hours}h {minutes}m"
-    return "Expired"
+    return "❌ Expired"
 
 def activate_subscription(user_id, plan_key):
     plan = STAR_PRICES.get(plan_key)
@@ -179,13 +186,13 @@ def create_activation_code(seconds=86400):
 
 def activate_code(user_id, code):
     if is_admin(user_id):
-        return True, "أنت أدمن، لا تحتاج تفعيل!"
+        return True, "👑 You are admin, no need to redeem!"
     codes = load_codes()
     if code not in codes:
-        return False, "الكود غير صالح!"
+        return False, "❌ Invalid code!"
     code_data = codes[code]
     if code_data.get('used', False):
-        return False, "الكود مستخدم من قبل!"
+        return False, "❌ Code already used!"
     
     users = load_users()
     user_id_str = str(user_id)
@@ -210,7 +217,7 @@ def activate_code(user_id, code):
     save_codes(codes)
     
     hours = code_data['seconds'] // 3600
-    return True, f"تم التفعيل! أضيف {hours} ساعة. ينتهي في {datetime.fromtimestamp(new_expiry).strftime('%Y-%m-%d %H:%M:%S')}"
+    return True, f"✅ Activated! Added {hours} hours. Expires: {datetime.fromtimestamp(new_expiry).strftime('%Y-%m-%d %H:%M:%S')}"
 
 def is_admin(user_id):
     return user_id in ADMIN_IDS
@@ -323,6 +330,9 @@ PREMIUM_EMOJI_IDS = {
     "⚡": "5219943216781995020", "💳": "5447453226498552490", "💠": "5870498447068502918",
     "📝": "5444860552310457690", "🌐": "5447602197439218445", "📊": "4911241630633165627",
     "⭐": "5801104080646444587", "👑": "5303547611351902889", "💎": "5305726937887433606",
+    "🚀": "5303534082204920602", "⏱️": "5303243514782443814", "🔌": "5305622454218024328",
+    "🆓": "5116382939571028928", "📁": "5303102515301083665", "🗑️": "5868517294618975202",
+    "💰": "5303159080020372094", "🔍": "5305346287820895195", "📢": "5454245266305604993",
 }
 
 def premium_emoji(text: str) -> str:
@@ -335,7 +345,10 @@ def premium_emoji(text: str) -> str:
 
 # ==================== الكيبوردات ====================
 def get_main_menu_keyboard():
-    return [[Button.inline("📋 Commands", b"show_commands")], [Button.url("📢 Channel", "https://t.me/SONIC")]]
+    return [
+        [Button.inline("📋 Commands", b"show_commands")],
+        [Button.url("📢 Channel", "https://t.me/ReGict7")]
+    ]
 
 def get_commands_keyboard():
     return [[Button.inline("🔙 Back", b"main_menu")]]
@@ -383,19 +396,25 @@ async def get_user_stats_text(user_id, username):
     else:
         is_active, expiry = get_user_subscription(user_id)
         if is_active:
-            status = f"⭐ ACTIVE | {time_left} left"
+            status = f"⭐ ACTIVE | {time_left}"
         else:
             status = "🆓 EXPIRED | /subscribe"
     
-    text = f"👋 Welcome @{username}!\n\n"
-    text += f"🚀 SONIC Account\n\n"
-    text += f"    ┣ 📝 Plan: {status}\n"
-    text += f"    ┣ 🌐 Sites: {sites_count}\n"
-    text += f"    ┣ 🔌 Your Proxies: {proxies_count}\n"
-    text += f"    ┗ 💡 Max combo: {MAX_CARDS_PER_COMBO} cards\n\n"
-    text += f"💡 Buy subscription: /subscribe\n"
-    text += f"🔌 Add proxies: /addproxy or /addproxies\n\n"
-    text += f"💡 Made by: @SONIC"
+    text = f"""👋 Welcome @{username}!
+
+🚀 SONIC Account
+
+    ┣ 📝 Plan: {status}
+    ┣ 🌐 Sites: {sites_count}
+    ┣ 🔌 Your Proxies: {proxies_count}
+    ┗ 💡 Max combo: {MAX_CARDS_PER_COMBO} cards
+
+📢 Channel: @ReGict7
+
+💡 Buy subscription: /subscribe
+🔌 Add proxies: /addproxy or /addproxies
+
+💡 Made by: @ISoonik"""
     return text
 
 # ==================== دوال فحص البروكسيات ====================
@@ -439,7 +458,7 @@ async def test_proxy_batch(proxies, batch_size=20):
         await asyncio.sleep(0.3)
     return results
 
-# ==================== دوال فحص المواقع (نفس اللي شغال في ملفك) ====================
+# ==================== دوال فحص المواقع ====================
 async def get_site_gateway(site, proxy):
     """جلب بوابة الموقع باستخدام كارت اختبار"""
     test_card = "4031630422575208|01|2030|280"
@@ -492,7 +511,7 @@ async def get_site_cheapest_product_price(site, proxy):
         return None
 
 async def test_site(site, proxy):
-    """فحص الموقع - نفس اللي شغال عندك"""
+    """فحص الموقع"""
     test_card = "4031630422575208|01|2030|280"
     try:
         if site.startswith('https://') or site.startswith('http://'):
@@ -620,15 +639,16 @@ def extract_cc(text):
 async def send_hit_message(user_id, result, hit_type):
     if hit_type == 'Charged':
         emoji = "💎"
-        status_text = "𝐂𝐇𝐀𝐑𝐆𝐄𝐃"
+        status_text = "CHARGED"
     else:
         emoji = "✅"
-        status_text = "𝐀𝐏𝐏𝐑𝐎𝐕𝐄𝐃"
+        status_text = "APPROVED"
 
     brand, bin_type, level, bank, country, flag = await get_bin_info(result['card'].split('|')[0])
 
-    message = f"""<b>━━━━━━━━━━━━━━━━━</b>
-<b>⚡ 𝐇𝐢𝐭</b>
+    # رسالة للمستخدم (بالتفاصيل الكاملة)
+    user_message = f"""<b>━━━━━━━━━━━━━━━━━</b>
+<b>⚡ SONIC HIT</b>
 <blockquote>{emoji} Status: {status_text}</blockquote>
 <blockquote>💳 Card: <code>{result['card']}</code></blockquote>
 <blockquote>📝 Response: {result['message'][:150]}</blockquote>
@@ -638,7 +658,25 @@ async def send_hit_message(user_id, result, hit_type):
 Bank: {bank}
 Country: {country} {flag}</pre>"""
 
-    await send_with_retry(user_id, premium_emoji(message), parse_mode='html')
+    await send_with_retry(user_id, premium_emoji(user_message), parse_mode='html')
+    
+    # إذا كانت Charged، نرسل إشعار للقناة بدون تفاصيل البطاقة
+    if hit_type == 'Charged':
+        channel_message = f"""<b>⚡ SONIC - New Order Placed!</b>
+
+💎 Status: CHARGED
+🌐 Gateway: {result.get('gateway', 'Unknown')}
+💰 Amount: {result.get('price', '-')}
+👤 User: <code>{user_id}</code>
+⏱️ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+🔥 SONIC BOT"""
+        
+        try:
+            # إرسال للقناة
+            await bot.send_message(OWNER_CHANNEL_ID, premium_emoji(channel_message), parse_mode='html')
+        except Exception as e:
+            print(f"Error sending to channel: {e}")
 
 # ==================== نظام الدفع بالنجوم ====================
 def send_star_invoice(chat_id, title, description, payload, prices):
@@ -667,7 +705,7 @@ async def create_star_invoice(user_id, plan_key):
         return None
     
     title = f"⭐ SONIC - {plan['name']}"
-    description = f"Subscribe for {plan['name']}\nGet unlimited card checks for {plan['name']}"
+    description = f"Subscribe for {plan['name']}\nGet unlimited card checks for {plan['name']}\n\n👑 Bot Owner: @ISoonik"
     payload = f"sub_{plan_key}"
     prices = [(plan['name'], plan['stars'])]
     
@@ -714,7 +752,8 @@ async def handle_successful_payment(message):
                         premium_emoji(f"✅ <b>SONIC Subscription Activated!</b>\n\n"
                                      f"⭐ Plan: {plan['name']}\n"
                                      f"📅 Expires: {expiry_date}\n\n"
-                                     f"Thank you for choosing SONIC! 🚀"),
+                                     f"🔥 Unlimited card checks during subscription!\n\n"
+                                     f"👑 Bot Owner: @ISoonik"),
                         parse_mode='html'
                     )
                     
@@ -763,7 +802,7 @@ async def check_subscription(event):
     
     if not is_user_subscribed(user_id):
         try:
-            await send_with_retry(user_id, premium_emoji(f"❌ <b>SONIC Access Denied</b>\n\nNo active subscription.\n\nBuy: /subscribe\nRedeem: /redeem CODE"), parse_mode='html')
+            await send_with_retry(user_id, premium_emoji(f"❌ <b>SONIC Access Denied</b>\n\nNo active subscription.\n\n⭐ Buy: /subscribe\n🎫 Redeem: /redeem CODE\n\n👑 Bot Owner: @ISoonik"), parse_mode='html')
         except:
             pass
         raise events.StopPropagation
@@ -772,7 +811,7 @@ async def check_subscription(event):
 async def start(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_retry(user_id, premium_emoji("🚫 Banned"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 You have been banned from SONIC bot."), parse_mode='html')
         return
     sender = await event.get_sender()
     username = sender.username or f"user_{user_id}"
@@ -815,7 +854,9 @@ async def handle_callback(event):
 
 <b>⭐ SONIC PREMIUM</b>
 ├ /subscribe - Buy
-└ /redeem CODE"""
+└ /redeem CODE
+
+👑 Bot Owner: @ISoonik"""
         if is_admin(user_id):
             txt += "\n\n<b>👑 ADMIN</b>\n├ /admin\n├ /gencode\n├ /block\n├ /unblock\n├ /broadcast\n├ /addtime\n├ /users\n├ /user\n└ /stats"
         await event.edit(premium_emoji(txt), buttons=get_commands_keyboard(), parse_mode='html')
@@ -910,7 +951,7 @@ async def handle_callback(event):
     
     await event.answer()
 
-# ==================== معالج فلتر السعر (نفس اللي شغال في ملفك) ====================
+# ==================== معالج فلتر السعر ====================
 async def handle_price_filter(event, user_id, price_key):
     if user_id not in user_pending_sites:
         await event.edit(premium_emoji("❌ Session expired. Please use /sitecheck again."), buttons=get_admin_sites_menu(), parse_mode='html')
@@ -1142,6 +1183,7 @@ async def profile_cmd(event):
     sites_count = len(load_sites())
     
     txt = f"""<b>👤 SONIC Profile</b>
+
 ├ 🆔 ID: <code>{user_id}</code>
 ├ 👤 Name: {first_name}
 ├ 📝 Username: @{username}
@@ -1451,7 +1493,7 @@ async def single_cc_cmd(event):
         return
     
     if not is_admin(user_id) and not is_user_subscribed(user_id):
-        await send_with_retry(user_id, premium_emoji("❌ No active subscription\n\nBuy: /subscribe\nRedeem: /redeem CODE"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ No active subscription\n\n⭐ Buy: /subscribe\n🎫 Redeem: /redeem CODE\n\n👑 Bot Owner: @ISoonik"), parse_mode='html')
         return
     
     sites = load_sites()
@@ -1516,7 +1558,7 @@ async def mass_check_cmd(event):
         return
     
     if not is_admin(user_id) and not is_user_subscribed(user_id):
-        await send_with_retry(user_id, premium_emoji("❌ No active subscription\n\nBuy: /subscribe\nRedeem: /redeem CODE"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ No active subscription\n\n⭐ Buy: /subscribe\n🎫 Redeem: /redeem CODE\n\n👑 Bot Owner: @ISoonik"), parse_mode='html')
         return
     
     if not event.is_reply:
@@ -1859,7 +1901,7 @@ async def subscribe_cmd(event):
     for key, plan in STAR_PRICES.items():
         kb.append([Button.inline(f"⭐ {plan['name']} - {plan['stars']}⭐", f"sub_{key}")])
     kb.append([Button.inline("🔙 Back", b"main_menu")])
-    await send_with_retry(user_id, premium_emoji("⭐ <b>SONIC Premium Subscription</b>\n\nPay with Telegram Stars.\nGet time-based access!\n\nPlans:\n• 1 Hour - 30⭐\n• 12 Hours - 50⭐\n• 1 Day - 100⭐\n• 3 Days - 250⭐\n• 1 Week - 500⭐\n\n🔥 Unlimited card checks during subscription!"), buttons=kb, parse_mode='html')
+    await send_with_retry(user_id, premium_emoji("⭐ <b>SONIC Premium Subscription</b>\n\nPay with Telegram Stars.\nGet time-based access!\n\n📋 Plans:\n• 1 Hour - 30⭐\n• 12 Hours - 50⭐\n• 1 Day - 100⭐\n• 3 Days - 250⭐\n• 1 Week - 500⭐\n\n🔥 Unlimited card checks during subscription!\n\n👑 Bot Owner: @ISoonik"), buttons=kb, parse_mode='html')
 
 @bot.on(events.NewMessage(pattern=r'^/redeem\s+'))
 async def redeem_cmd(event):
@@ -1904,6 +1946,7 @@ async def main():
     print("✅ SONIC BOT STARTED SUCCESSFULLY!")
     print("⚡ SONIC BOT (Telethon + Stars)")
     print(f"👑 Admins: {ADMIN_IDS}")
+    print(f"📢 Owner Channel: {OWNER_CHANNEL}")
     print(f"⭐ Subscription plans:")
     print(f"   - 1 Hour: 30 stars")
     print(f"   - 12 Hours: 50 stars")
