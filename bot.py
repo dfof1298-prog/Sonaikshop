@@ -10,6 +10,7 @@ import secrets
 import requests
 from datetime import datetime
 from telethon import TelegramClient, events, Button
+from telethon.tl.types import LabeledPrice
 
 # ==================== إعدادات البوت ====================
 CHECKER_API_URL = 'https://apiehopf-production.up.railway.app'
@@ -23,7 +24,7 @@ ADMIN_IDS = [1093032296, 7077116674]
 OWNER_CHANNEL = 'https://t.me/ReGict7'
 OWNER_CHANNEL_ID = 2635018188  # غير هذا بعد ما تجيب الـ ID من /get_chat_id
 
-# إعدادات الاشتراك الزمني بالنجوم
+# إعدادات الاشتراك الزمني بالنجوم (الأسعار المطلوبة)
 STAR_PRICES = {
     "1h": {"name": "1 Hour", "stars": 30, "seconds": 3600},
     "12h": {"name": "12 Hours", "stars": 50, "seconds": 43200},
@@ -58,7 +59,10 @@ user_current_check = {}
 user_pending_mass = {}
 user_pending_sites = {}
 
-bot = TelegramClient('sonic_bot', API_ID, API_HASH)
+# استخدام جلسة فريدة لكل تشغيل
+SESSION_NAME = f"sonic_bot_{int(time.time())}"
+
+bot = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
 # ==================== دوال المواقع (عامة) ====================
 def load_sites():
@@ -417,7 +421,7 @@ async def get_user_stats_text(user_id, username):
 💡 <b>Made by:</b> @ISoonik"""
     return text
 
-# ==================== دوال فحص البروكسيات (سريعة) ====================
+# ==================== دوال فحص البروكسيات ====================
 def parse_proxy_url(proxy_str):
     if not proxy_str:
         return None
@@ -458,9 +462,9 @@ async def test_proxy_batch(proxies, batch_size=25):
         await asyncio.sleep(0.2)
     return results
 
-# ==================== دوال فحص المواقع (المضمونة 100%) ====================
-async def check_site_via_api(site, proxy):
-    """الطريقة الأساسية: استخدام API"""
+# ==================== دوال فحص المواقع ====================
+async def is_site_shopify(site, proxy):
+    """تحديد إذا كان الموقع Shopify"""
     test_card = "4031630422575208|01|2030|280"
     try:
         site = site.replace('https://', '').replace('http://', '').rstrip('/')
@@ -471,46 +475,14 @@ async def check_site_via_api(site, proxy):
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url) as resp:
                 if resp.status != 200:
-                    return None, None
+                    return False, None
                 raw = await resp.json()
                 gateway = raw.get('Gateway', '').lower()
-                status = raw.get('Status', False)
-                return gateway, status
+                if gateway and any(allowed in gateway for allowed in ALLOWED_GATEWAYS):
+                    return True, gateway
+                return False, gateway
     except:
-        return None, None
-
-async def check_site_via_products(site, proxy):
-    """الطريقة الثانية: فتح products.json"""
-    try:
-        site = site.replace('https://', '').replace('http://', '').rstrip('/')
-        url = f'https://{site}/products.json?limit=1'
-        timeout = aiohttp.ClientTimeout(total=8)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, ssl=False) as resp:
-                if resp.status == 200:
-                    return True
-                return False
-    except:
-        return False
-
-async def check_site_via_direct(site, proxy):
-    """الطريقة الثالثة: فتح الموقع مباشرة"""
-    try:
-        site = site.replace('https://', '').replace('http://', '').rstrip('/')
-        url = f'https://{site}'
-        timeout = aiohttp.ClientTimeout(total=8)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, ssl=False, allow_redirects=True) as resp:
-                if resp.status == 200 or resp.status in [301, 302, 303, 307, 308]:
-                    return True
-                return False
-    except:
-        return False
-
-async def get_site_gateway(site, proxy):
-    """جلب Gateway الموقع"""
-    gateway, _ = await check_site_via_api(site, proxy)
-    return gateway
+        return False, None
 
 async def get_site_min_price(site, proxy):
     """جلب أرخص سعر منتج"""
@@ -537,46 +509,26 @@ async def get_site_min_price(site, proxy):
     except:
         return None
 
-async def is_site_shopify(site, proxy):
-    """تحديد إذا كان الموقع Shopify"""
-    gateway, _ = await check_site_via_api(site, proxy)
-    if gateway and any(allowed in gateway for allowed in ALLOWED_GATEWAYS):
-        return True, gateway
-    
-    # محاولة products.json
-    if await check_site_via_products(site, proxy):
-        return True, "shopify (products.json)"
-    
-    return False, None
-
 async def test_site(site, proxy):
     """فحص موقع - للإضافة السريعة"""
-    # أولاً: التحقق من Shopify
-    is_shopify, gateway = await is_site_shopify(site, proxy)
+    is_shopify, _ = await is_site_shopify(site, proxy)
     if is_shopify:
         return {'site': site, 'status': 'alive'}
-    
-    # ثانياً: التحقق المباشر
-    if await check_site_via_direct(site, proxy):
-        return {'site': site, 'status': 'alive'}
-    
     return {'site': site, 'status': 'dead'}
 
 async def check_site_complete(site, proxy, price_range):
     """فحص كامل للموقع مع فلتر السعر"""
-    # 1. التحقق من Shopify
     is_shopify, gateway = await is_site_shopify(site, proxy)
     
     if not is_shopify:
-        return {'site': site, 'status': 'dead', 'reason': 'Not Shopify site'}
+        return {'site': site, 'status': 'dead', 'reason': f'Not Shopify (Gateway: {gateway})'}
     
-    # 2. التحقق من السعر إذا كان مطلوب
     if price_range["min"] > 0 or price_range["max"] < 999999:
         min_price = await get_site_min_price(site, proxy)
         if min_price is not None and min_price > price_range["max"]:
             return {'site': site, 'status': 'dead', 'reason': f'Price ${min_price:.2f} > ${price_range["max"]}'}
     
-    return {'site': site, 'status': 'alive', 'reason': f'Shopify | Gateway: {gateway}'}
+    return {'site': site, 'status': 'alive', 'reason': f'Shopify'}
 
 # ==================== دوال فحص الكروت ====================
 async def check_card(card, site, proxy):
@@ -716,45 +668,44 @@ Country: {country} {flag}</pre>"""
         except Exception as e:
             print(f"Channel send error: {e}")
 
-# ==================== نظام الدفع بالنجوم ====================
-def send_star_invoice(chat_id, title, description, payload, prices):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendInvoice"
-    prices_list = [{"label": label, "amount": amount} for label, amount in prices]
-    data = {
-        "chat_id": chat_id,
-        "title": title,
-        "description": description,
-        "payload": payload,
-        "provider_token": "",
-        "currency": "XTR",
-        "prices": json.dumps(prices_list),
-        "start_parameter": "subscription"
-    }
-    try:
-        response = requests.post(url, json=data, timeout=30)
-        return response.json()
-    except Exception as e:
-        print(f"Invoice error: {e}")
-        return None
-
-async def create_star_invoice(user_id, plan_key):
+# ==================== نظام الدفع بالنجوم (المحسن) ====================
+async def send_star_invoice(user_id, plan_key):
+    """إرسال فاتورة نجوم باستخدام Bot API مباشرة"""
     plan = STAR_PRICES.get(plan_key)
     if not plan:
         return None
     
-    title = f"⭐ SONIC - {plan['name']}"
-    description = f"Subscribe for {plan['name']}\nGet unlimited card checks for {plan['name']}\n\n👑 Bot Owner: @ISoonik"
-    payload = f"sub_{plan_key}"
-    prices = [(plan['name'], plan['stars'])]
+    # استخدام Bot API مباشرة
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendInvoice"
     
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, send_star_invoice, user_id, title, description, payload, prices)
+    prices = [{"label": plan['name'], "amount": plan['stars']}]
     
-    if result and result.get('ok'):
-        return result
-    return None
+    payload = {
+        "chat_id": user_id,
+        "title": f"⭐ SONIC - {plan['name']}",
+        "description": f"Subscribe for {plan['name']}\nGet unlimited card checks for {plan['name']}\n\n🎁 Bot Owner: @ISoonik",
+        "payload": f"sub_{plan_key}",
+        "provider_token": "",
+        "currency": "XTR",
+        "prices": json.dumps(prices),
+        "start_parameter": "sonic_subscription"
+    }
+    
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        result = response.json()
+        if result.get('ok'):
+            print(f"Invoice sent to {user_id} for {plan['name']}")
+            return result
+        else:
+            print(f"Invoice error: {result}")
+            return None
+    except Exception as e:
+        print(f"Invoice error: {e}")
+        return None
 
 async def check_for_payments():
+    """فحص مستمر للدفعات الجديدة"""
     last_update_id = 0
     while True:
         try:
@@ -772,6 +723,7 @@ async def check_for_payments():
         await asyncio.sleep(2)
 
 async def handle_successful_payment(message):
+    """معالجة الدفع الناجح"""
     try:
         user_id = message['from']['id']
         payment = message['successful_payment']
@@ -804,7 +756,7 @@ async def handle_successful_payment(message):
                                          f"💰 Amount: {plan['stars']} stars"),
                             parse_mode='html'
                         )
-                    print(f"[PAYMENT] User {user_id} bought {plan['name']}")
+                    print(f"[PAYMENT] User {user_id} bought {plan['name']} for {plan['stars']} stars")
     except Exception as e:
         print(f"[PAYMENT ERROR] {e}")
 
@@ -914,7 +866,7 @@ async def handle_callback(event):
     
     elif data.startswith("sub_"):
         plan_key = data.split("_")[1]
-        await create_star_invoice(user_id, plan_key)
+        await send_star_invoice(user_id, plan_key)
         await event.answer()
     
     # أوامر الأدمن
@@ -997,7 +949,7 @@ async def handle_callback(event):
     
     await event.answer()
 
-# ==================== معالج فلتر السعر (المضمن) ====================
+# ==================== معالج فلتر السعر ====================
 async def handle_price_filter(event, user_id, price_key):
     if user_id not in user_pending_sites:
         await event.edit(premium_emoji("❌ Session expired. Please use /sitecheck again."), buttons=get_admin_sites_menu(), parse_mode='html')
@@ -1052,7 +1004,7 @@ Sites have been updated with only valid Shopify sites."""
             if len(invalid_sites) > 10:
                 result_text += f"• ... and {len(invalid_sites) - 10} more"
     
-    else:  # action == 'add'
+    else:
         current_sites = load_sites()
         new_sites = [s for s in valid_sites if s not in current_sites]
         all_sites = list(set(current_sites + valid_sites))
@@ -1364,7 +1316,7 @@ async def sitecheck_cmd(event):
     
     await send_with_retry(user_id, premium_emoji("💰 <b>Select price range to filter sites:</b>\n\nOnly Shopify sites will be kept.\nSites with higher min price will be removed.\n\nThis will check each site and remove dead/non-Shopify sites."), buttons=get_price_filter_keyboard(), parse_mode='html')
 
-# ==================== أوامر إدارة البروكسيات (السريعة) ====================
+# ==================== أوامر إدارة البروكسيات ====================
 @bot.on(events.NewMessage(pattern='/addproxy'))
 async def addproxy_cmd(event):
     user_id = event.sender_id
@@ -1952,6 +1904,15 @@ async def redeem_cmd(event):
 
 # ==================== التشغيل ====================
 async def main():
+    # حذف الجلسات القديمة لتجنب مشكلة "another user is using the same session"
+    for f in os.listdir('.'):
+        if f.startswith('sonic_bot') and f.endswith('.session'):
+            try:
+                os.remove(f)
+                print(f"🗑️ Removed old session: {f}")
+            except:
+                pass
+    
     await bot.start(bot_token=BOT_TOKEN)
     
     for admin in ADMIN_IDS:
