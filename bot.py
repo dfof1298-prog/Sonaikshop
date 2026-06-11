@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SONIC BOT - python-telegram-bot version
+# SONIC BOT - python-telegram-bot version (FULL CODE)
 import asyncio
 import aiohttp
 import aiofiles
@@ -11,7 +11,6 @@ import re
 import secrets
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
-from collections import deque
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice,
@@ -58,7 +57,7 @@ PRICE_RANGES = {
     "4": {"name": "⭐ No filter", "min": 0, "max": 999999}
 }
 
-# متغيرات الجلسات النشطة (للـ Mass Check)
+# متغيرات الجلسات النشطة
 active_sessions: Dict[str, Dict] = {}
 user_current_check: Dict[int, bool] = {}
 user_pending_mass: Dict[int, Dict] = {}
@@ -239,6 +238,11 @@ async def create_user_if_not_exists(update: Update, context: CallbackContext):
             'blocked': False
         }
         save_users(users)
+        for admin in ADMIN_IDS:
+            try:
+                await context.bot.send_message(admin, f"🆕 <b>New user joined!</b>\n\n🆔 ID: <code>{user.id}</code>\n👤 Username: @{user.username or 'None'}\n📅 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", parse_mode=ParseMode.HTML)
+            except:
+                pass
 
 # ==================== دوال الفحص (Async) ====================
 def parse_proxy_url(proxy_str: str) -> Optional[str]:
@@ -313,6 +317,22 @@ async def get_site_min_price(site: str, proxy: str) -> Optional[float]:
     except:
         return None
 
+async def test_site(site: str, proxy: str) -> Dict:
+    is_shop, _ = await is_site_shopify(site, proxy)
+    if is_shop:
+        return {'site': site, 'status': 'alive'}
+    return {'site': site, 'status': 'dead'}
+
+async def check_site_complete(site: str, proxy: str, price_range: Dict) -> Dict:
+    is_shop, gateway = await is_site_shopify(site, proxy)
+    if not is_shop:
+        return {'site': site, 'status': 'dead', 'reason': f'Not Shopify (Gateway: {gateway})'}
+    if price_range["min"] > 0 or price_range["max"] < 999999:
+        min_price = await get_site_min_price(site, proxy)
+        if min_price is not None and min_price > price_range["max"]:
+            return {'site': site, 'status': 'dead', 'reason': f'Price ${min_price:.2f} > ${price_range["max"]}'}
+    return {'site': site, 'status': 'alive', 'reason': 'Shopify'}
+
 async def check_card(card: str, site: str, proxy: str) -> Dict:
     try:
         if '|' not in card or len(card.split('|')) != 4:
@@ -381,6 +401,33 @@ def extract_cc(text: str) -> List[str]:
         cards.append(f"{card}|{month}|{year}|{cvv}")
     return cards
 
+async def send_hit_notification(user_id: int, result: Dict, hit_type: str, context: CallbackContext):
+    emoji = "💎" if hit_type == 'Charged' else "✅"
+    status_text = "CHARGED" if hit_type == 'Charged' else "APPROVED"
+    brand, bin_type, level, bank, country, flag = await get_bin_info(result['card'].split('|')[0])
+    msg = f"""<b>━━━━━━━━━━━━━━━━━</b>
+<b>⚡ 𝐇𝐢𝐭</b>
+<blockquote>{emoji} Status: {status_text}</blockquote>
+<blockquote>💳 Card: <code>{result['card']}</code></blockquote>
+<blockquote>📝 Response: {result['message'][:150]}</blockquote>
+<blockquote>🌐 Gateway: 🔥 {result.get('gateway', 'Unknown')} | 💰 {result.get('price', '-')}</blockquote>
+<b>💠 BIN Info</b>
+<pre>BIN: {brand} - {bin_type} - {level}
+Bank: {bank}
+Country: {country} {flag}</pre>"""
+    await context.bot.send_message(chat_id=user_id, text=msg, parse_mode=ParseMode.HTML)
+    if hit_type == 'Charged' and OWNER_CHANNEL_ID:
+        try:
+            channel_msg = f"""<b>🎯 New Order Placed!</b>
+👤 User: <code>{user_id}</code>
+💎 Status: CHARGED
+🌐 Gateway: {result.get('gateway', 'Unknown')}
+💰 Amount: {result.get('price', '-')}
+⏱️ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+            await context.bot.send_message(chat_id=OWNER_CHANNEL_ID, text=channel_msg, parse_mode=ParseMode.HTML)
+        except:
+            pass
+
 # ==================== دوال الواجهة ====================
 def get_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -388,7 +435,7 @@ def get_main_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📢 Channel", url=OWNER_CHANNEL_LINK)]
     ])
 
-def get_back_keyboard() -> InlineKeyboardMarkup:
+def get_commands_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]])
 
 def get_subscription_keyboard() -> InlineKeyboardMarkup:
@@ -507,7 +554,7 @@ async def profile(update: Update, context: CallbackContext):
 ├ ⭐ Status: {'👑 ADMIN' if is_admin(user.id) else '✅ PREMIUM' if active else '❌ FREE'}
 ├ 📅 Registered: {reg}
 └ ⭐ Subscription: {'✅ Active until ' + expiry_str if active else '❌ No active subscription'}"""
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_keyboard())
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=get_commands_keyboard())
 
 async def myproxy(update: Update, context: CallbackContext):
     user = update.effective_user
@@ -735,34 +782,7 @@ Country: {country} {flag}</pre>
     finally:
         user_current_check[user.id] = False
 
-async def send_hit_notification(user_id: int, result: Dict, hit_type: str, context: CallbackContext):
-    emoji = "💎" if hit_type == 'Charged' else "✅"
-    status_text = "CHARGED" if hit_type == 'Charged' else "APPROVED"
-    brand, bin_type, level, bank, country, flag = await get_bin_info(result['card'].split('|')[0])
-    msg = f"""<b>━━━━━━━━━━━━━━━━━</b>
-<b>⚡ 𝐇𝐢𝐭</b>
-<blockquote>{emoji} Status: {status_text}</blockquote>
-<blockquote>💳 Card: <code>{result['card']}</code></blockquote>
-<blockquote>📝 Response: {result['message'][:150]}</blockquote>
-<blockquote>🌐 Gateway: 🔥 {result.get('gateway', 'Unknown')} | 💰 {result.get('price', '-')}</blockquote>
-<b>💠 BIN Info</b>
-<pre>BIN: {brand} - {bin_type} - {level}
-Bank: {bank}
-Country: {country} {flag}</pre>"""
-    await context.bot.send_message(chat_id=user_id, text=msg, parse_mode=ParseMode.HTML)
-    if hit_type == 'Charged' and OWNER_CHANNEL_ID:
-        try:
-            channel_msg = f"""<b>🎯 New Order Placed!</b>
-👤 User: <code>{user_id}</code>
-💎 Status: CHARGED
-🌐 Gateway: {result.get('gateway', 'Unknown')}
-💰 Amount: {result.get('price', '-')}
-⏱️ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
-            await context.bot.send_message(chat_id=OWNER_CHANNEL_ID, text=channel_msg, parse_mode=ParseMode.HTML)
-        except:
-            pass
-
-# ==================== فحص جماعي (مع أزرار التحكم) ====================
+# ==================== فحص جماعي ====================
 async def mass_check(update: Update, context: CallbackContext):
     user = update.effective_user
     if is_user_blocked(user.id) and not is_admin(user.id):
@@ -827,7 +847,6 @@ async def mode_selection(update: Update, context: CallbackContext):
     session_key = f"{user_id}_{int(time.time())}"
     active_sessions[session_key] = {'paused': False, 'stop': False}
     msg = await query.edit_message_text(f"🚀 SONIC starting {len(cards)} cards...")
-    # تشغيل المهمة في الخلفية
     context.application.create_task(run_mass_check(user_id, cards, sites, proxies, mode, session_key, msg.message_id, context))
 
 async def run_mass_check(user_id: int, cards: List[str], sites: List[str], proxies: List[str],
@@ -875,7 +894,6 @@ async def run_mass_check(user_id: int, cards: List[str], sites: List[str], proxi
             except:
                 pass
         await asyncio.sleep(random.uniform(0.8, 1.2))
-    # النتيجة النهائية
     elapsed = int(time.time() - results['start'])
     hits = "\n".join([f"💎 <code>{r['card']}</code> | {r.get('price', '-')}" for r in results['charged'][:10]])
     if mode == 'all_hits':
@@ -1133,136 +1151,6 @@ async def handle_admin_text(update: Update, context: CallbackContext):
         user_pending_sites[user.id] = {'action': 'add', 'sites': new_sites}
         await update.message.reply_text(f"💰 Select price range for {len(new_sites)} sites:", reply_markup=get_price_filter_keyboard())
 
-# ==================== الاشتراك والدفع ====================
-async def subscribe(update: Update, context: CallbackContext):
-    user = update.effective_user
-    if is_user_blocked(user.id) and not is_admin(user.id):
-        await update.message.reply_text("🚫 Banned")
-        return
-    await update.message.reply_text("⭐ <b>SONIC Premium Subscription</b>\n\nPay with Telegram Stars.\nGet time-based access!\n\n📋 Plans:\n• 1 Hour - 30⭐\n• 12 Hours - 50⭐\n• 1 Day - 100⭐\n• 3 Days - 250⭐\n• 1 Week - 500⭐\n\n🔥 Unlimited card checks during subscription!\n\n👑 Bot Owner: @ISoonik\n📢 Channel: @ReGict7", parse_mode=ParseMode.HTML, reply_markup=get_subscription_keyboard())
-
-async def subscription_callback(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    if data.startswith("sub_"):
-        plan_key = data[4:]
-        plan = STAR_PRICES.get(plan_key)
-        if not plan:
-            await query.edit_message_text("Invalid plan")
-            return
-        await context.bot.send_invoice(
-            chat_id=query.from_user.id,
-            title=f"⭐ SONIC - {plan['name']}",
-            description=f"Subscribe for {plan['name']}\nGet unlimited card checks for {plan['name']}\n\n👑 Bot Owner: @ISoonik",
-            payload=f"sub_{plan_key}",
-            provider_token="",
-            currency="XTR",
-            prices=[LabeledPrice(label=plan['name'], amount=plan['stars'])],
-            start_parameter="sonic_sub"
-        )
-    elif data == "main_menu":
-        await query.edit_message_text(await get_user_stats_text(query.from_user.id, query.from_user.username or str(query.from_user.id)), parse_mode=ParseMode.HTML, reply_markup=get_main_keyboard())
-
-async def pre_checkout(update: Update, context: CallbackContext):
-    query: PreCheckoutQuery = update.pre_checkout_query
-    await query.answer(ok=True)
-
-async def successful_payment(update: Update, context: CallbackContext):
-    payment: SuccessfulPayment = update.message.successful_payment
-    user_id = update.effective_user.id
-    payload = payment.invoice_payload
-    if payload.startswith("sub_"):
-        plan_key = payload[4:]
-        if activate_subscription(user_id, plan_key):
-            plan = STAR_PRICES[plan_key]
-            await update.message.reply_text(f"✅ <b>SONIC Subscription Activated!</b>\n\n⭐ Plan: {plan['name']}\n📅 Expires after {plan['name']}\n\n🔥 Enjoy unlimited card checks!\n👑 Bot Owner: @ISoonik", parse_mode=ParseMode.HTML)
-            for admin in ADMIN_IDS:
-                await context.bot.send_message(admin, f"💎 <b>SONIC - Star Payment!</b>\n👤 User: <code>{user_id}</code>\n⭐ Plan: {plan['name']}\n💰 Amount: {plan['stars']} stars", parse_mode=ParseMode.HTML)
-        else:
-            await update.message.reply_text("❌ Error activating subscription. Contact admin.")
-
-async def redeem(update: Update, context: CallbackContext):
-    user = update.effective_user
-    if is_user_blocked(user.id) and not is_admin(user.id):
-        await update.message.reply_text("🚫 Banned")
-        return
-    if is_admin(user.id):
-        await update.message.reply_text("👑 You are admin, no need to redeem!")
-        return
-    args = update.message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await update.message.reply_text("❌ Usage: /redeem CODE")
-        return
-    code = args[1].strip().upper()
-    success, msg = activate_code(user.id, code)
-    await update.message.reply_text(msg)
-
-# ==================== أوامر إضافية للأدمن ====================
-async def gencode(update: Update, context: CallbackContext):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Admin only")
-        return
-    args = update.message.text.split()
-    hours = 24
-    if len(args) > 1:
-        try:
-            hours = int(args[1])
-        except:
-            pass
-    seconds = hours * 3600
-    code = create_activation_code(seconds)
-    await update.message.reply_text(f"✅ <b>SONIC Code Generated!</b>\n\nCode: <code>{code}</code>\nDuration: {hours} hours", parse_mode=ParseMode.HTML)
-
-async def users_list(update: Update, context: CallbackContext):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Admin only")
-        return
-    users = get_all_users()
-    if not users:
-        await update.message.reply_text("No users")
-        return
-    text = "<b>📋 Users List:</b>\n\n"
-    for uid, data in list(users.items())[:50]:
-        username = data.get('username', '?')
-        blocked = "🚫" if data.get('blocked') else "✅"
-        active = "⭐" if data.get('subscription_expiry', 0) > time.time() else "❌"
-        text += f"<code>{uid}</code> | @{username} | {active} | {blocked}\n"
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-
-async def user_info(update: Update, context: CallbackContext):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Admin only")
-        return
-    args = update.message.text.split()
-    if len(args) < 2:
-        await update.message.reply_text("❌ /user user_id")
-        return
-    uid = args[1]
-    users = load_users()
-    data = users.get(uid, {})
-    expiry = data.get('subscription_expiry', 0)
-    expiry_str = datetime.fromtimestamp(expiry).strftime('%Y-%m-%d %H:%M:%S') if expiry > 0 else "No subscription"
-    text = f"""<b>👤 User {uid}</b>
-├ Username: @{data.get('username', '?')}
-├ Blocked: {data.get('blocked', False)}
-├ Premium: {data.get('premium', False)}
-├ Registered: {data.get('registered_at', '?')[:10]}
-└ Expires: {expiry_str}"""
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-
-async def stats(update: Update, context: CallbackContext):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Admin only")
-        return
-    users = get_all_users()
-    total = len(users)
-    active = sum(1 for u in users.values() if u.get('subscription_expiry', 0) > time.time())
-    blocked = sum(1 for u in users.values() if u.get('blocked', False))
-    codes = len(load_codes())
-    sites = len(load_sites())
-    await update.message.reply_text(f"<b>📊 SONIC Stats</b>\n👥 Users: {total}\n⭐ Active: {active}\n🚫 Blocked: {blocked}\n🌐 Sites: {sites}\n🎫 Codes: {codes}", parse_mode=ParseMode.HTML)
-
 # ==================== أوامر المواقع البسيطة ====================
 async def site_command(update: Update, context: CallbackContext):
     if not is_admin(update.effective_user.id):
@@ -1327,6 +1215,185 @@ async def mysites(update: Update, context: CallbackContext):
     text = "\n".join([f"• {s}" for s in sites])
     await update.message.reply_text(f"📋 <b>Sites ({len(sites)}):</b>\n\n{text}", parse_mode=ParseMode.HTML)
 
+# ==================== الاشتراك والدفع ====================
+async def subscribe(update: Update, context: CallbackContext):
+    user = update.effective_user
+    if is_user_blocked(user.id) and not is_admin(user.id):
+        await update.message.reply_text("🚫 Banned")
+        return
+    await update.message.reply_text("⭐ <b>SONIC Premium Subscription</b>\n\nPay with Telegram Stars.\nGet time-based access!\n\n📋 Plans:\n• 1 Hour - 30⭐\n• 12 Hours - 50⭐\n• 1 Day - 100⭐\n• 3 Days - 250⭐\n• 1 Week - 500⭐\n\n🔥 Unlimited card checks during subscription!\n\n👑 Bot Owner: @ISoonik\n📢 Channel: @ReGict7", parse_mode=ParseMode.HTML, reply_markup=get_subscription_keyboard())
+
+async def subscription_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    if data.startswith("sub_"):
+        plan_key = data[4:]
+        plan = STAR_PRICES.get(plan_key)
+        if not plan:
+            await query.edit_message_text("Invalid plan")
+            return
+        await context.bot.send_invoice(
+            chat_id=query.from_user.id,
+            title=f"⭐ SONIC - {plan['name']}",
+            description=f"Subscribe for {plan['name']}\nGet unlimited card checks for {plan['name']}\n\n👑 Bot Owner: @ISoonik",
+            payload=f"sub_{plan_key}",
+            provider_token="",
+            currency="XTR",
+            prices=[LabeledPrice(label=plan['name'], amount=plan['stars'])],
+            start_parameter="sonic_sub"
+        )
+    elif data == "main_menu":
+        text = await get_user_stats_text(query.from_user.id, query.from_user.username or str(query.from_user.id))
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_main_keyboard())
+
+async def pre_checkout(update: Update, context: CallbackContext):
+    query: PreCheckoutQuery = update.pre_checkout_query
+    await query.answer(ok=True)
+
+async def successful_payment(update: Update, context: CallbackContext):
+    payment: SuccessfulPayment = update.message.successful_payment
+    user_id = update.effective_user.id
+    payload = payment.invoice_payload
+    if payload.startswith("sub_"):
+        plan_key = payload[4:]
+        if activate_subscription(user_id, plan_key):
+            plan = STAR_PRICES[plan_key]
+            await update.message.reply_text(f"✅ <b>SONIC Subscription Activated!</b>\n\n⭐ Plan: {plan['name']}\n📅 Expires after {plan['name']}\n\n🔥 Enjoy unlimited card checks!\n👑 Bot Owner: @ISoonik", parse_mode=ParseMode.HTML)
+            for admin in ADMIN_IDS:
+                await context.bot.send_message(admin, f"💎 <b>SONIC - Star Payment!</b>\n👤 User: <code>{user_id}</code>\n⭐ Plan: {plan['name']}\n💰 Amount: {plan['stars']} stars", parse_mode=ParseMode.HTML)
+        else:
+            await update.message.reply_text("❌ Error activating subscription. Contact admin.")
+
+async def redeem(update: Update, context: CallbackContext):
+    user = update.effective_user
+    if is_user_blocked(user.id) and not is_admin(user.id):
+        await update.message.reply_text("🚫 Banned")
+        return
+    if is_admin(user.id):
+        await update.message.reply_text("👑 You are admin, no need to redeem!")
+        return
+    args = update.message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await update.message.reply_text("❌ Usage: /redeem CODE")
+        return
+    code = args[1].strip().upper()
+    success, msg = activate_code(user.id, code)
+    await update.message.reply_text(msg)
+
+# ==================== أوامر الأدمن الإضافية ====================
+async def gencode(update: Update, context: CallbackContext):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Admin only")
+        return
+    args = update.message.text.split()
+    hours = 24
+    if len(args) > 1:
+        try:
+            hours = int(args[1])
+        except:
+            pass
+    seconds = hours * 3600
+    code = create_activation_code(seconds)
+    await update.message.reply_text(f"✅ <b>SONIC Code Generated!</b>\n\nCode: <code>{code}</code>\nDuration: {hours} hours", parse_mode=ParseMode.HTML)
+
+async def users_list(update: Update, context: CallbackContext):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Admin only")
+        return
+    users = get_all_users()
+    if not users:
+        await update.message.reply_text("No users")
+        return
+    text = "<b>📋 Users List:</b>\n\n"
+    for uid, data in list(users.items())[:50]:
+        username = data.get('username', '?')
+        blocked = "🚫" if data.get('blocked') else "✅"
+        active = "⭐" if data.get('subscription_expiry', 0) > time.time() else "❌"
+        text += f"<code>{uid}</code> | @{username} | {active} | {blocked}\n"
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+async def user_info(update: Update, context: CallbackContext):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Admin only")
+        return
+    args = update.message.text.split()
+    if len(args) < 2:
+        await update.message.reply_text("❌ /user user_id")
+        return
+    uid = args[1]
+    users = load_users()
+    data = users.get(uid, {})
+    expiry = data.get('subscription_expiry', 0)
+    expiry_str = datetime.fromtimestamp(expiry).strftime('%Y-%m-%d %H:%M:%S') if expiry > 0 else "No subscription"
+    text = f"""<b>👤 User {uid}</b>
+├ Username: @{data.get('username', '?')}
+├ Blocked: {data.get('blocked', False)}
+├ Premium: {data.get('premium', False)}
+├ Registered: {data.get('registered_at', '?')[:10]}
+└ Expires: {expiry_str}"""
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+async def stats(update: Update, context: CallbackContext):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Admin only")
+        return
+    users = get_all_users()
+    total = len(users)
+    active = sum(1 for u in users.values() if u.get('subscription_expiry', 0) > time.time())
+    blocked = sum(1 for u in users.values() if u.get('blocked', False))
+    codes = len(load_codes())
+    sites = len(load_sites())
+    await update.message.reply_text(f"<b>📊 SONIC Stats</b>\n👥 Users: {total}\n⭐ Active: {active}\n🚫 Blocked: {blocked}\n🌐 Sites: {sites}\n🎫 Codes: {codes}", parse_mode=ParseMode.HTML)
+
+# ==================== معالج الأزرار العامة ====================
+async def button_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    user_id = query.from_user.id
+    if data == "show_commands":
+        txt = """<b>📋 SONIC COMMANDS</b>
+├ /start - Main menu
+├ /help - Help
+├ /profile - Profile
+├ /myproxy - Your proxies
+
+<b>🌐 SITES (Admin only)</b>
+├ /site domain - Add site
+├ /rmsite url - Remove site
+├ /addsites - Upload sites file
+├ /clearsites - Clear all
+├ /sitecheck - Check & filter sites
+├ /mysites - View all sites
+
+<b>🔌 YOUR PROXIES</b>
+├ /proxy - Check & remove dead (FAST)
+├ /addproxy - Add (one per line)
+├ /addproxies - Upload .txt file
+├ /chkproxy - Check one
+├ /rmproxy - Remove one
+├ /clearproxy - Remove all
+├ /getproxy - Get all
+
+<b>💳 CARD CHECKING</b>
+├ /cc card|mm|yy|cvv
+├ /chk - Mass check
+└ /mcancel - Cancel
+
+<b>⭐ SONIC PREMIUM</b>
+├ /subscribe - Buy
+└ /redeem CODE
+
+👑 <b>Bot Owner:</b> @ISoonik
+📢 <b>Channel:</b> @ReGict7"""
+        if is_admin(user_id):
+            txt += "\n\n<b>👑 ADMIN</b>\n├ /admin\n├ /gencode\n├ /block\n├ /unblock\n├ /broadcast\n├ /addtime\n├ /users\n├ /user\n└ /stats"
+        await query.edit_message_text(txt, parse_mode=ParseMode.HTML, reply_markup=get_commands_keyboard())
+    elif data == "main_menu":
+        text = await get_user_stats_text(user_id, query.from_user.username or str(user_id))
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_main_keyboard())
+
 # ==================== التشغيل ====================
 def main():
     # إنشاء المجلدات اللازمة
@@ -1335,7 +1402,7 @@ def main():
         open('sites.txt', 'w').close()
     # إعداد التطبيق
     application = Application.builder().token(BOT_TOKEN).build()
-    # الأوامر
+    # الأوامر الأساسية
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("profile", profile))
@@ -1366,6 +1433,7 @@ def main():
     application.add_handler(PreCheckoutQueryHandler(pre_checkout))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
     # معالجات الكيبورد
+    application.add_handler(CallbackQueryHandler(button_callback, pattern="^(show_commands|main_menu)$"))
     application.add_handler(CallbackQueryHandler(subscription_callback, pattern="^(sub_|main_menu)"))
     application.add_handler(CallbackQueryHandler(mode_selection, pattern="^(mode_charges|mode_all|mode_cancel)"))
     application.add_handler(CallbackQueryHandler(control_callback, pattern="^(pause_|resume_|stop_)"))
@@ -1373,9 +1441,13 @@ def main():
     # معالجات النص للأدمن
     application.add_handler(MessageHandler(filters.TEXT & filters.User(ADMIN_IDS), handle_admin_text))
     # تشغيل البوت
+    print("=" * 55)
     print("✅ SONIC BOT STARTED (python-telegram-bot version)")
     print(f"👑 Admins: {ADMIN_IDS}")
     print(f"⭐ Plans: {len(STAR_PRICES)}")
+    print(f"📊 Max cards per combo: {MAX_CARDS_PER_COMBO}")
+    print(f"🌐 Sites file: sites.txt ({len(load_sites())} sites)")
+    print("=" * 55)
     application.run_polling()
 
 if __name__ == '__main__':
