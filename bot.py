@@ -10,7 +10,6 @@ import secrets
 import requests
 from datetime import datetime
 from telethon import TelegramClient, events, Button
-from telethon.tl.types import LabeledPrice
 
 # ==================== إعدادات البوت ====================
 CHECKER_API_URL = 'https://apiehopf-production.up.railway.app'
@@ -24,7 +23,7 @@ ADMIN_IDS = [1093032296, 7077116674]
 OWNER_CHANNEL = 'https://t.me/ReGict7'
 OWNER_CHANNEL_ID = 2635018188  # غير هذا بعد ما تجيب الـ ID من /get_chat_id
 
-# إعدادات الاشتراك الزمني بالنجوم (الأسعار المطلوبة)
+# إعدادات الاشتراك الزمني بالنجوم
 STAR_PRICES = {
     "1h": {"name": "1 Hour", "stars": 30, "seconds": 3600},
     "12h": {"name": "12 Hours", "stars": 50, "seconds": 43200},
@@ -59,10 +58,20 @@ user_current_check = {}
 user_pending_mass = {}
 user_pending_sites = {}
 
-# استخدام جلسة فريدة لكل تشغيل
-SESSION_NAME = f"sonic_bot_{int(time.time())}"
+# إنشاء مجلد للجلسات إذا لم يكن موجوداً
+if not os.path.exists('sessions'):
+    os.makedirs('sessions')
 
-bot = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+# حذف الجلسات القديمة
+for f in os.listdir('sessions'):
+    if f.endswith('.session'):
+        try:
+            os.remove(os.path.join('sessions', f))
+        except:
+            pass
+
+SESSION_FILE = "sessions/sonic_bot"
+bot = TelegramClient(SESSION_FILE, API_ID, API_HASH)
 
 # ==================== دوال المواقع (عامة) ====================
 def load_sites():
@@ -79,7 +88,7 @@ def save_sites(sites):
         for site in sites:
             f.write(f"{site}\n")
 
-# ==================== دوال البروكسيات (خاصة بكل مستخدم) ====================
+# ==================== دوال البروكسيات ====================
 def get_user_proxy_file(user_id):
     return f"user_{user_id}_proxy.txt"
 
@@ -464,7 +473,6 @@ async def test_proxy_batch(proxies, batch_size=25):
 
 # ==================== دوال فحص المواقع ====================
 async def is_site_shopify(site, proxy):
-    """تحديد إذا كان الموقع Shopify"""
     test_card = "4031630422575208|01|2030|280"
     try:
         site = site.replace('https://', '').replace('http://', '').rstrip('/')
@@ -485,7 +493,6 @@ async def is_site_shopify(site, proxy):
         return False, None
 
 async def get_site_min_price(site, proxy):
-    """جلب أرخص سعر منتج"""
     try:
         site = site.replace('https://', '').replace('http://', '').rstrip('/')
         url = f'https://{site}/products.json?limit=50'
@@ -510,14 +517,12 @@ async def get_site_min_price(site, proxy):
         return None
 
 async def test_site(site, proxy):
-    """فحص موقع - للإضافة السريعة"""
     is_shopify, _ = await is_site_shopify(site, proxy)
     if is_shopify:
         return {'site': site, 'status': 'alive'}
     return {'site': site, 'status': 'dead'}
 
 async def check_site_complete(site, proxy, price_range):
-    """فحص كامل للموقع مع فلتر السعر"""
     is_shopify, gateway = await is_site_shopify(site, proxy)
     
     if not is_shopify:
@@ -528,7 +533,7 @@ async def check_site_complete(site, proxy, price_range):
         if min_price is not None and min_price > price_range["max"]:
             return {'site': site, 'status': 'dead', 'reason': f'Price ${min_price:.2f} > ${price_range["max"]}'}
     
-    return {'site': site, 'status': 'alive', 'reason': f'Shopify'}
+    return {'site': site, 'status': 'alive', 'reason': 'Shopify'}
 
 # ==================== دوال فحص الكروت ====================
 async def check_card(card, site, proxy):
@@ -654,7 +659,6 @@ Country: {country} {flag}</pre>"""
 
     await send_with_retry(user_id, premium_emoji(message), parse_mode='html')
     
-    # إرسال إشعار للقناة بدون تفاصيل البطاقة
     if hit_type == 'Charged' and OWNER_CHANNEL_ID:
         try:
             channel_msg = f"""<b>🎯 New Order Placed!</b>
@@ -668,14 +672,12 @@ Country: {country} {flag}</pre>"""
         except Exception as e:
             print(f"Channel send error: {e}")
 
-# ==================== نظام الدفع بالنجوم (المحسن) ====================
+# ==================== نظام الدفع بالنجوم ====================
 async def send_star_invoice(user_id, plan_key):
-    """إرسال فاتورة نجوم باستخدام Bot API مباشرة"""
     plan = STAR_PRICES.get(plan_key)
     if not plan:
         return None
     
-    # استخدام Bot API مباشرة
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendInvoice"
     
     prices = [{"label": plan['name'], "amount": plan['stars']}]
@@ -705,7 +707,6 @@ async def send_star_invoice(user_id, plan_key):
         return None
 
 async def check_for_payments():
-    """فحص مستمر للدفعات الجديدة"""
     last_update_id = 0
     while True:
         try:
@@ -723,7 +724,6 @@ async def check_for_payments():
         await asyncio.sleep(2)
 
 async def handle_successful_payment(message):
-    """معالجة الدفع الناجح"""
     try:
         user_id = message['from']['id']
         payment = message['successful_payment']
@@ -1904,15 +1904,6 @@ async def redeem_cmd(event):
 
 # ==================== التشغيل ====================
 async def main():
-    # حذف الجلسات القديمة لتجنب مشكلة "another user is using the same session"
-    for f in os.listdir('.'):
-        if f.startswith('sonic_bot') and f.endswith('.session'):
-            try:
-                os.remove(f)
-                print(f"🗑️ Removed old session: {f}")
-            except:
-                pass
-    
     await bot.start(bot_token=BOT_TOKEN)
     
     for admin in ADMIN_IDS:
