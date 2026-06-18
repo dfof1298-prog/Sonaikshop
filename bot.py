@@ -1,8 +1,7 @@
 # SONIK MAIN BOT - COMPLETE VERSION WITH ENHANCEMENTS
-# Added: All working gateways accepted (except Authorize.Net)
+# Added: All working gateways accepted (except Authorize.Net and Checkout.com)
 # Fixed: Price filtering starts from 0.50 USD
 # Fixed: 3ds_required classified as Approved
-# Fixed: Retry logic for site verification
 # Fixed: /unban command works properly
 
 from telethon.errors import FloodWaitError
@@ -57,13 +56,13 @@ PAYMENT_BOT_USERNAME = "Stars838bot"
 
 # Worker Configuration
 SP_PER_USER_WORKERS = 30
-MSP_PER_USER_WORKERS = 70
+MSP_PER_USER_WORKERS = 50
 SITE_PER_USER_WORKERS = 30
 PROXY_PER_USER_WORKERS = 50
 BIN_WORKERS = 20
 
 # Timeout Configuration
-API_TIMEOUT = 90
+API_TIMEOUT = 60
 BIN_TIMEOUT = 60
 PROXY_TIMEOUT = 8
 PROXY_CHECK_BATCH = 50
@@ -79,8 +78,8 @@ client_instance = client
 _USER_SEMS = {}
 _BIN_SEM = asyncio.Semaphore(BIN_WORKERS)
 
-# Gateway settings - REJECT Authorize.Net ONLY
-REJECTED_GATEWAYS = ['authorize.net', 'authorize']
+# Gateway settings - REJECT Authorize.Net AND Checkout.com ONLY
+REJECTED_GATEWAYS = ['authorize.net', 'authorize', 'checkout.com', 'checkout']
 
 PRICE_RANGES = {
     "1": {"name": "0.50-5 USD", "min": 0.50, "max": 5},
@@ -321,62 +320,47 @@ def normalize_site_url(url):
 # ====================== GATEWAY DETECTION ======================
 async def detect_payment_gateway(site, proxy_data=None, http_session=None):
     test_card = "5154623245618097|03|2032|156"
-    for attempt in range(3):
-        try:
-            url = build_api_url(site if site.startswith('http') else f'https://{site}', test_card, proxy_data)
-            s = http_session or (await get_user_http_session(0, "site"))
-            async with s.get(url, timeout=20) as resp:
-                if resp.status != 200:
-                    if attempt < 2:
-                        await asyncio.sleep(0.5)
-                        continue
-                    return 'dead'
-                try:
-                    raw = await resp.json(content_type=None)
-                except:
-                    if attempt < 2:
-                        await asyncio.sleep(0.5)
-                        continue
-                    return 'unknown'
-                
-                rm = str(raw.get('Response', '')).lower()
-                gw = str(raw.get('Gate', raw.get('Gateway', ''))).lower()
-                
-                # لو الموقع Shopify حتى لو الـ Response فاضي
+    try:
+        url = build_api_url(site if site.startswith('http') else f'https://{site}', test_card, proxy_data)
+        s = http_session or (await get_user_http_session(0, "site"))
+        async with s.get(url, timeout=15) as resp:
+            if resp.status != 200:
+                return 'dead'
+            try:
+                raw = await resp.json(content_type=None)
+            except:
+                return 'unknown'
+            
+            rm = str(raw.get('Response', '')).lower()
+            gw = str(raw.get('Gate', raw.get('Gateway', ''))).lower()
+            
+            if 'shopify' in gw:
+                return 'shopify'
+            
+            if is_site_error(rm) and 'empty submit' not in rm:
+                return 'dead'
+            
+            if rm == '' or rm == 'empty submit response':
                 if 'shopify' in gw:
                     return 'shopify'
-                
-                # لو الـ Response فيه error حقيقي
-                if is_site_error(rm) and 'empty submit' not in rm:
-                    return 'dead'
-                
-                # لو الـ Response فاضي بس Gate = shopify
-                if rm == '' or rm == 'empty submit response':
-                    if 'shopify' in gw:
-                        return 'shopify'
-                    return 'unknown'
-                
-                # أي بوابة تانية شغالة
-                if gw and gw != '' and gw != 'unknown':
-                    return gw
-                
-                if rm and not is_site_error(rm):
-                    return 'shopify'
-                
                 return 'unknown'
-        except Exception:
-            if attempt < 2:
-                await asyncio.sleep(0.5)
-                continue
-            return 'error'
-    return 'error'
+            
+            if gw and gw != '' and gw != 'unknown':
+                return gw
+            
+            if rm and not is_site_error(rm):
+                return 'shopify'
+            
+            return 'unknown'
+    except:
+        return 'error'
 
 async def get_site_product_price(site, proxy_data=None, http_session=None):
     test_card = "5154623245618097|03|2032|156"
     try:
         url = build_api_url(site if site.startswith('http') else f'https://{site}', test_card, proxy_data)
         s = http_session or (await get_user_http_session(0, "site"))
-        async with s.get(url, timeout=20) as resp:
+        async with s.get(url, timeout=15) as resp:
             if resp.status != 200:
                 return None
             try:
@@ -394,83 +378,53 @@ async def get_site_product_price(site, proxy_data=None, http_session=None):
                 except:
                     pass
             return None
-    except Exception:
+    except:
         return None
 
-async def verify_site_full(site, proxy_data=None, http_session=None, max_retries=3):
-    for attempt in range(max_retries):
-        try:
-            if proxy_data and attempt > 0:
-                proxies = await get_all_user_proxies(0)
-                if proxies:
-                    proxy_data = random.choice(proxies)
-            
-            gateway = await detect_payment_gateway(site, proxy_data, http_session)
-            
-            # رفض Authorize.Net فقط
-            if gateway in ['authorize.net', 'authorize']:
-                return {
-                    'site': site,
-                    'status': 'rejected',
-                    'reason': f'Rejected gateway: {gateway}',
-                    'gateway': gateway,
-                    'price': None
-                }
-            
-            if gateway == 'dead' or gateway == 'unknown' or gateway == 'error':
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1.5)
-                    continue
-                return {
-                    'site': site,
-                    'status': 'rejected',
-                    'reason': f'Gateway detection failed: {gateway}',
-                    'gateway': gateway,
-                    'price': None
-                }
-            
-            price = await get_site_product_price(site, proxy_data, http_session)
-            
-            if price is not None and price < 0.50:
-                price = None
-            
-            if gateway == 'shopify' or 'shopify' in gateway:
-                return {
-                    'site': site,
-                    'status': 'alive',
-                    'gateway': gateway,
-                    'price': price,
-                    'price_val': price if price else 999.0,
-                    'reason': None
-                }
-            
+async def verify_site_full(site, proxy_data=None, http_session=None, max_retries=1):
+    try:
+        gateway = await detect_payment_gateway(site, proxy_data, http_session)
+        price = await get_site_product_price(site, proxy_data, http_session)
+        
+        # رفض Authorize.Net و Checkout.com فقط
+        if gateway in ['authorize.net', 'authorize', 'checkout.com', 'checkout']:
             return {
                 'site': site,
-                'status': 'alive',
+                'status': 'rejected',
+                'reason': f'Rejected gateway: {gateway}',
                 'gateway': gateway,
-                'price': price,
-                'price_val': price if price else 999.0,
-                'reason': None
-            }
-            
-        except Exception as e:
-            if attempt < max_retries - 1:
-                await asyncio.sleep(1.5)
-                continue
-            return {
-                'site': site,
-                'status': 'error',
-                'reason': str(e)[:50],
-                'gateway': 'unknown',
                 'price': None
             }
-    return {
-        'site': site,
-        'status': 'error',
-        'reason': 'Max retries exceeded',
-        'gateway': 'unknown',
-        'price': None
-    }
+        
+        if gateway == 'dead' or gateway == 'unknown' or gateway == 'error':
+            return {
+                'site': site,
+                'status': 'rejected',
+                'reason': f'Gateway detection failed: {gateway}',
+                'gateway': gateway,
+                'price': None
+            }
+        
+        if price is not None and price < 0.50:
+            price = None
+        
+        return {
+            'site': site,
+            'status': 'alive',
+            'gateway': gateway,
+            'price': price,
+            'price_val': price if price else 999.0,
+            'reason': None
+        }
+        
+    except Exception as e:
+        return {
+            'site': site,
+            'status': 'error',
+            'reason': str(e)[:50],
+            'gateway': 'unknown',
+            'price': None
+        }
 
 # ====================== MESSAGE SYSTEM ======================
 def build_entities(html_text, emoji_ids=None):
@@ -1068,7 +1022,7 @@ async def add_site(event):
 {PE} <code>/add site.com</code>
 {PE} <i>{bs('Or reply to a .txt file')}</i>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <i>{bs('All working sites are accepted (except Authorize.Net)')}</i>""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["link"]])
+{PE} <i>{bs('All working sites are accepted (except Authorize.Net and Checkout.com)')}</i>""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["link"]])
         sites_list = list(dict.fromkeys(sites_list))
         existing_sites = await get_global_sites()
         existing_norm = {normalize_site_url(s) for s in existing_sites}
@@ -1094,7 +1048,7 @@ async def add_site(event):
 {PE} <b>{bs('New Sites')}:</b> <code>{len(new_sites)}</code>
 {PE} <b>{bs('Already Exist')}:</b> <code>{len(already_exists)}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <i>{bs('Only working sites will be added (except Authorize.Net)')}</i>
+{PE} <i>{bs('Only working sites will be added (except Authorize.Net and Checkout.com)')}</i>
 {PE} <i>{bs('Sites with price above range will be excluded')}</i>""", buttons=kb, emoji_ids=[CE["fire"], CE["fire"], CE["globe"], CE["warn"], CE["info"]])
 
     except Exception as e:
@@ -1135,7 +1089,7 @@ async def _process_add_sites_with_filter(event, new_sites, already_exists, price
         nonlocal tested, working, dead, added, price_filtered, rejected_gateway
         async with user_site_sem:
             try:
-                res = await verify_site_full(site, random.choice(proxies) if proxies else None, http_session=http_session, max_retries=3)
+                res = await verify_site_full(site, random.choice(proxies) if proxies else None, http_session=http_session)
                 tested += 1
                 
                 if res['status'] == 'rejected':
@@ -1169,13 +1123,13 @@ async def _process_add_sites_with_filter(event, new_sites, already_exists, price
 {PE} <b>{bs('Tested')}:</b> <code>{tested}</code>
 {PE} <b>{bs('Working (Any Gateway)')}:</b> <code>{working}</code>
 {PE} <b>{bs('Dead')}:</b> <code>{dead}</code>
-{PE} <b>{bs('Rejected (Authorize.Net/Error)')}:</b> <code>{rejected_gateway}</code>
+{PE} <b>{bs('Rejected (Authorize.Net/Checkout.com/Error)')}:</b> <code>{rejected_gateway}</code>
 {PE} <b>{bs('Price Filtered')}:</b> <code>{price_filtered}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
 {PE} <b>{bs('Added')} (${price_range['min']}-${price_range['max']}):</b> <code>{added}</code>
 {PE} <b>{bs('Already Existed')}:</b> <code>{len(already_exists)}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <i>{bs('All working sites except Authorize.Net are accepted')}</i>""", emoji_ids=[CE["check"], CE["check"], CE["globe"], CE["fire"], CE["cross"], CE["chart"], CE["warn"], CE["info"]])
+{PE} <i>{bs('All working sites except Authorize.Net and Checkout.com are accepted')}</i>""", emoji_ids=[CE["check"], CE["check"], CE["globe"], CE["fire"], CE["cross"], CE["chart"], CE["warn"], CE["info"]])
     
     await cleanup_user_http_session(uid, "site")
     cleanup_user_sem(uid)
@@ -1251,7 +1205,7 @@ async def check_sites_with_filter_cmd(event):
 {PE} <b>{bs('Total Sites')}:</b> <code>{len(sites)}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
 {PE} <i>{bs('Select price range to filter')}</i>
-{PE} <i>{bs('All working sites with any gateway are kept (except Authorize.Net)')}</i>""", buttons=kb, emoji_ids=[CE["fire"], CE["fire"], CE["globe"], CE["info"]])
+{PE} <i>{bs('All working sites with any gateway are kept (except Authorize.Net and Checkout.com)')}</i>""", buttons=kb, emoji_ids=[CE["fire"], CE["fire"], CE["globe"], CE["info"]])
 
 @client.on(events.CallbackQuery(pattern=rb"site_price_range:(\d+):(\d+)"))
 async def site_price_range_cb(event):
@@ -1290,7 +1244,7 @@ async def _process_site_check_with_filter(event, price_range):
         nonlocal tested, alive, dead, price_filtered, kept, rejected_gateway
         async with user_site_sem:
             try:
-                res = await verify_site_full(site, random.choice(proxies) if proxies else None, http_session=http_session, max_retries=3)
+                res = await verify_site_full(site, random.choice(proxies) if proxies else None, http_session=http_session)
                 tested += 1
                 
                 if res['status'] == 'rejected':
@@ -1342,7 +1296,7 @@ async def _process_site_check_with_filter(event, price_range):
 {PE} <b>{bs('Total Tested')}:</b> <code>{total}</code>
 {PE} <b>{bs('Alive (Any Gateway)')}:</b> <code>{alive}</code>
 {PE} <b>{bs('Dead')}:</b> <code>{dead}</code>
-{PE} <b>{bs('Rejected (Authorize.Net/Error)')}:</b> <code>{rejected_gateway}</code>
+{PE} <b>{bs('Rejected (Authorize.Net/Checkout.com/Error)')}:</b> <code>{rejected_gateway}</code>
 {PE} <b>{bs('Price Filtered Out')}:</b> <code>{price_filtered}</code>
 {PE} <b>{bs('Removed from sites.txt')}:</b> <code>{removed_count}</code>
 {PE} <b>{bs('Kept in sites.txt')}:</b> <code>{kept}</code>
@@ -2174,7 +2128,7 @@ async def main():
             MAIN_BOT_USERNAME = me.username
             client_instance = client
             log_system("BOOT", f"✅ Sonik Bot (@{MAIN_BOT_USERNAME}) started!")
-            log_system("BOOT", "✅ Enhanced features: All gateways except Authorize.Net accepted")
+            log_system("BOOT", "✅ Enhanced features: All gateways except Authorize.Net and Checkout.com accepted")
             log_system("BOOT", "✅ Price filtering from 0.50 USD")
             log_system("BOOT", "✅ 3ds_required classified as Approved")
             await client.run_until_disconnected()
