@@ -49,7 +49,7 @@ JOIN_GROUP_ID = -1002635018188
 JOIN_CHANNEL_ID = -1002635018188
 JOIN_GROUP_LINK = "https://t.me/ReGict7"
 JOIN_CHANNEL_LINK = "https://t.me/ReGict7"
-API_BASE_URL = "http://62.72.20.10:8081"
+API_BASE_URL = "http://62.72.20.10:8081/shopify"
 
 # Payment bot username
 PAYMENT_BOT_USERNAME = "Stars838bot"
