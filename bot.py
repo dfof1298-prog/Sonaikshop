@@ -1,7 +1,7 @@
-# SONIK MAIN BOT - COMPLETE VERSION WITH CODE/REDEEM SYSTEM
-# Added: /code and /redeem commands
+# SONIK MAIN BOT - COMPLETE VERSION WITH FIXED /REDEEM COMMAND
+# Fixed: /redeem command now works for all users
+# Added: Code system with /code and /redeem
 # Enhanced: Performance optimizations for high load
-# Added: Code generation and redemption system
 
 from telethon.errors import FloodWaitError
 from telethon import TelegramClient, events, Button
@@ -55,11 +55,11 @@ API_BASE_URL = "https://deadline-shopify-production-2b43.up.railway.app/shopify"
 PAYMENT_BOT_USERNAME = "Stars838bot"
 
 # Worker Configuration - INCREASED for better performance
-SP_PER_USER_WORKERS = 50  # Increased from 30
-MSP_PER_USER_WORKERS = 60  # Increased from 40
-SITE_PER_USER_WORKERS = 50  # Increased from 30
-PROXY_PER_USER_WORKERS = 80  # Increased from 50
-BIN_WORKERS = 30  # Increased from 20
+SP_PER_USER_WORKERS = 50
+MSP_PER_USER_WORKERS = 60
+SITE_PER_USER_WORKERS = 50
+PROXY_PER_USER_WORKERS = 80
+BIN_WORKERS = 30
 
 # Timeout Configuration
 API_TIMEOUT = 60
@@ -72,7 +72,7 @@ HIT_DELAY = 1.5
 MAX_CARDS_MASS = 5000
 
 # Code System Settings
-CODE_EXPIRY_HOURS = 24  # Codes expire after 24 hours
+CODE_EXPIRY_HOURS = 24
 
 # Client
 client = TelegramClient('sonik_main', API_ID, API_HASH)
@@ -81,10 +81,10 @@ client_instance = client
 _USER_SEMS = {}
 _BIN_SEM = asyncio.Semaphore(BIN_WORKERS)
 
-# BIN Cache for performance
+# BIN Cache
 _BIN_CACHE = {}
 _BIN_CACHE_TIME = {}
-_BIN_CACHE_TTL = 3600  # 1 hour cache
+_BIN_CACHE_TTL = 3600
 
 # Gateway settings - REJECT Authorize.Net AND Checkout.com ONLY
 REJECTED_GATEWAYS = ['authorize.net', 'authorize', 'checkout.com', 'checkout','Checkout.com - Onsite Payments']
@@ -277,6 +277,10 @@ async def redeem_code(user_id, code):
     if code_data.get("expires_at", datetime.now(timezone.utc)) < datetime.now(timezone.utc):
         return {"success": False, "message": "Code expired"}
     
+    # Check if user already has active subscription
+    if await is_user_subscribed(user_id):
+        return {"success": False, "message": "You already have an active subscription"}
+    
     # Update code as used
     await db["codes"].update_one(
         {"code": code.upper()},
@@ -458,7 +462,6 @@ async def verify_site_full(site, proxy_data=None, http_session=None, max_retries
         gateway = await detect_payment_gateway(site, proxy_data, http_session)
         price = await get_site_product_price(site, proxy_data, http_session)
         
-        # رفض Authorize.Net و Checkout.com فقط
         if gateway in ['authorize.net', 'authorize', 'checkout.com', 'checkout']:
             return {
                 'site': site,
@@ -755,7 +758,6 @@ async def get_bin_info(cn):
     
     bin_prefix = cn[:6]
     
-    # Check cache first
     if bin_prefix in _BIN_CACHE:
         cache_time = _BIN_CACHE_TIME.get(bin_prefix, 0)
         if time.time() - cache_time < _BIN_CACHE_TTL:
@@ -777,7 +779,6 @@ async def get_bin_info(cn):
                         "country": d.get('country_name', '-'),
                         "flag": d.get('country_flag', '🏳️')
                     }
-                # Cache the result
                 _BIN_CACHE[bin_prefix] = result
                 _BIN_CACHE_TIME[bin_prefix] = time.time()
                 return result
@@ -1129,7 +1130,7 @@ async def generate_code_cmd(event):
 
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]redeem\b'))
 async def redeem_code_cmd(event):
-    """User command to redeem a subscription code"""
+    """User command to redeem a subscription code - FIXED to work for all users"""
     if await check_maintenance(event):
         return
     
@@ -1138,10 +1139,20 @@ async def redeem_code_cmd(event):
     
     uid = event.sender_id
     
+    # Check if user is banned
     if await is_banned_user(uid):
         t, e = banned_user_message()
         return await styled_reply(event, t, emoji_ids=e)
     
+    # Check if user already has active subscription
+    if await is_user_subscribed(uid):
+        return await styled_reply(event, f"""{PE} <b>{bs('Already Subscribed')}</b> {PE}
+<b>━━━━━━━━━━━━━━━━━</b>
+{PE} <b>{bs('You already have an active subscription')}</b>
+{PE} <i>{bs('You cannot redeem a code while subscribed')}</i>
+{PE} <i>{bs('Wait for your subscription to expire')}</i>""", emoji_ids=[CE["warn"], CE["warn"], CE["info"]])
+    
+    # Parse command
     parts = event.raw_text.split()
     if len(parts) < 2:
         return await styled_reply(event, f"""{PE} <b>{bs('Redeem Code')}</b> {PE}
@@ -1149,68 +1160,78 @@ async def redeem_code_cmd(event):
 {PE} <code>/redeem CODE</code>
 {PE} <i>{bs('Example: /redeem ABC12345')}</i>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <i>{bs('Enter the code you received')}</i>""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["star"]])
+{PE} <i>{bs('Enter the code you received from admin')}</i>""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["star"]])
     
     code = parts[1].strip().upper()
     
     # Check if code exists and is valid
-    code_data = await db["codes"].find_one({"code": code})
-    
-    if not code_data:
-        return await styled_reply(event, f"""{PE} <b>{bs('Invalid Code')}</b> {PE}
+    try:
+        code_data = await db["codes"].find_one({"code": code})
+        
+        if not code_data:
+            return await styled_reply(event, f"""{PE} <b>{bs('Invalid Code')}</b> {PE}
 <b>━━━━━━━━━━━━━━━━━</b>
 {PE} <b>{bs('The code does not exist')}</b>
 {PE} <i>{bs('Please check and try again')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
-    
-    if code_data.get("used", False):
-        return await styled_reply(event, f"""{PE} <b>{bs('Code Already Used')}</b> {PE}
+        
+        if code_data.get("used", False):
+            return await styled_reply(event, f"""{PE} <b>{bs('Code Already Used')}</b> {PE}
 <b>━━━━━━━━━━━━━━━━━</b>
 {PE} <b>{bs('This code has already been redeemed')}</b>
 {PE} <i>{bs('Used by another user')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
-    
-    if code_data.get("expires_at", datetime.now(timezone.utc)) < datetime.now(timezone.utc):
-        return await styled_reply(event, f"""{PE} <b>{bs('Code Expired')}</b> {PE}
+        
+        if code_data.get("expires_at", datetime.now(timezone.utc)) < datetime.now(timezone.utc):
+            return await styled_reply(event, f"""{PE} <b>{bs('Code Expired')}</b> {PE}
 <b>━━━━━━━━━━━━━━━━━</b>
 {PE} <b>{bs('This code has expired')}</b>
 {PE} <i>{bs('Please contact admin for a new code')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
-    
-    # Check if user already has active subscription
-    if await is_user_subscribed(uid):
-        return await styled_reply(event, f"""{PE} <b>{bs('Already Subscribed')}</b> {PE}
+        
+        # Admin users cannot redeem codes (they already have access)
+        if uid in ADMIN_ID:
+            return await styled_reply(event, f"""{PE} <b>{bs('Admin Access')}</b> {PE}
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('You already have an active subscription')}</b>
-{PE} <i>{bs('You cannot redeem a code while subscribed')}</i>""", emoji_ids=[CE["warn"], CE["warn"], CE["info"]])
-    
-    # Redeem the code
-    result = await redeem_code(uid, code)
-    
-    if result["success"]:
-        # Notify admins
-        try:
-            sender = await event.get_sender()
-            name = sender.first_name or "User"
-            for admin in ADMIN_ID:
-                await styled_send(admin, f"""✅ <b>Code Redeemed!</b>
+{PE} <b>{bs('You are an admin')}</b>
+{PE} <i>{bs('Admins already have full access')}</i>
+{PE} <i>{bs('Use /give to give subscriptions to users')}</i>""", emoji_ids=[CE["crown"], CE["crown"], CE["info"]])
+        
+        # Redeem the code
+        result = await redeem_code(uid, code)
+        
+        if result["success"]:
+            # Notify admins
+            try:
+                sender = await event.get_sender()
+                name = sender.first_name or "User"
+                for admin in ADMIN_ID:
+                    await styled_send(admin, f"""✅ <b>Code Redeemed!</b>
 <b>━━━━━━━━━━━━━━━━━</b>
 <b>User:</b> <code>{uid}</code>
 <b>Name:</b> {name}
 <b>Code:</b> <code>{code}</code>
 <b>Hours:</b> <code>{result['hours']}h</code>
 <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}""", emoji_ids=[CE["check"], CE["gift"]])
-        except:
-            pass
-        
-        await styled_reply(event, f"""{PE} <b>{bs('Code Redeemed Successfully!')}</b> {PE}
+            except:
+                pass
+            
+            await styled_reply(event, f"""{PE} <b>{bs('Code Redeemed Successfully!')}</b> {PE}
 <b>━━━━━━━━━━━━━━━━━</b>
 {PE} <b>{bs('Subscription Added')}</b>
 {PE} <b>{bs('Hours')}:</b> <code>{result['hours']}h</code>
 <b>━━━━━━━━━━━━━━━━━</b>
 {PE} <i>{bs('You can now use all bot features')}</i>
 {PE} <code>/start</code> {bs('to see commands')}""", emoji_ids=[CE["gift"], CE["gift"], CE["check"], CE["star"], CE["info"]])
-    else:
-        await styled_reply(event, f"""{PE} <b>{bs('Failed to Redeem')}</b> {PE}
+        else:
+            await styled_reply(event, f"""{PE} <b>{bs('Failed to Redeem')}</b> {PE}
 <b>━━━━━━━━━━━━━━━━━</b>
 {PE} <b>{bs('Error')}:</b> <code>{result['message']}</code>
+{PE} <i>{bs('Please try again or contact admin')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
+            
+    except Exception as e:
+        log_user(uid, "REDEEM_ERROR", f"Error: {e}", "error")
+        await styled_reply(event, f"""{PE} <b>{bs('Error')}</b> {PE}
+<b>━━━━━━━━━━━━━━━━━</b>
+{PE} <b>{bs('An error occurred')}</b>
+{PE} <code>{str(e)[:100]}</code>
 {PE} <i>{bs('Please try again or contact admin')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
 
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]codes$'))
@@ -1219,34 +1240,37 @@ async def list_codes_cmd(event):
     if event.sender_id not in ADMIN_ID:
         return await styled_reply(event, f"{PE} <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
     
-    codes = await db["codes"].find().sort("created_at", -1).to_list(length=50)
-    
-    if not codes:
-        return await styled_reply(event, f"{PE} <b>{bs('No codes found')}</b>\n{PE} <code>/code hours</code> {bs('to generate')}", emoji_ids=[CE["warn"]])
-    
-    text = f"""{PE} <b>{bs('Recent Codes')}</b> ({len(codes)}) {PE}
+    try:
+        codes = await db["codes"].find().sort("created_at", -1).to_list(length=50)
+        
+        if not codes:
+            return await styled_reply(event, f"{PE} <b>{bs('No codes found')}</b>\n{PE} <code>/code hours</code> {bs('to generate')}", emoji_ids=[CE["warn"]])
+        
+        text = f"""{PE} <b>{bs('Recent Codes')}</b> ({len(codes)}) {PE}
 <b>━━━━━━━━━━━━━━━━━</b>
 """
-    
-    for code_data in codes[:20]:
-        code = code_data.get('code', '?')
-        hours = code_data.get('hours', '?')
-        used = "✅" if code_data.get('used', False) else "⬜"
-        created_by = code_data.get('created_by', '?')
-        expires = code_data.get('expires_at')
-        if expires:
-            expires_str = expires.strftime('%m-%d %H:%M')
-        else:
-            expires_str = '?'
         
-        text += f"{PE} {used} <code>{code}</code> ━ {hours}h ━ {expires_str}\n"
-    
-    if len(codes) > 20:
-        text += f"\n<i>+{len(codes)-20} more</i>"
-    
-    text += f"\n<b>━━━━━━━━━━━━━━━━━</b>\n{PE} ✅ Used | ⬜ Available"
-    
-    await styled_reply(event, text, emoji_ids=[CE["fire"], CE["fire"], CE["gift"]])
+        for code_data in codes[:20]:
+            code = code_data.get('code', '?')
+            hours = code_data.get('hours', '?')
+            used = "✅" if code_data.get('used', False) else "⬜"
+            created_by = code_data.get('created_by', '?')
+            expires = code_data.get('expires_at')
+            if expires:
+                expires_str = expires.strftime('%m-%d %H:%M')
+            else:
+                expires_str = '?'
+            
+            text += f"{PE} {used} <code>{code}</code> ━ {hours}h ━ {expires_str}\n"
+        
+        if len(codes) > 20:
+            text += f"\n<i>+{len(codes)-20} more</i>"
+        
+        text += f"\n<b>━━━━━━━━━━━━━━━━━</b>\n{PE} ✅ Used | ⬜ Available"
+        
+        await styled_reply(event, text, emoji_ids=[CE["fire"], CE["fire"], CE["gift"]])
+    except Exception as e:
+        await styled_reply(event, f"{PE} <b>{bs('Error')}:</b> <code>{e}</code>", emoji_ids=[CE["cross"]])
 
 # ====================== SITE MANAGEMENT ======================
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]add\b'))
@@ -2045,7 +2069,6 @@ async def stats_cmd(event):
         ap = await get_approved_count()
         sites_count = await get_total_sites_count()
         
-        # Get code stats
         total_codes = await db["codes"].count_documents({})
         used_codes = await db["codes"].count_documents({"used": True})
         
@@ -2379,7 +2402,6 @@ async def cleanup_expired_loop():
             if count > 0:
                 log_system("CLEANUP", f"Cleaned {count} expired subscriptions")
             
-            # Clean up expired codes
             expired_codes = await db["codes"].delete_many({
                 "expires_at": {"$lt": datetime.now(timezone.utc)},
                 "used": False
@@ -2387,12 +2409,11 @@ async def cleanup_expired_loop():
             if expired_codes.deleted_count > 0:
                 log_system("CLEANUP", f"Cleaned {expired_codes.deleted_count} expired codes")
             
-            # Clean old BIN cache
             global _BIN_CACHE, _BIN_CACHE_TIME
             now = time.time()
             keys_to_remove = []
             for key, cache_time in _BIN_CACHE_TIME.items():
-                if now - cache_time > _BIN_CACHE_TTL * 2:  # Clear after 2x TTL
+                if now - cache_time > _BIN_CACHE_TTL * 2:
                     keys_to_remove.append(key)
             for key in keys_to_remove:
                 _BIN_CACHE.pop(key, None)
@@ -2410,7 +2431,6 @@ async def main():
     log_system("BOOT", "Initializing database...")
     await init_db()
     
-    # Create codes collection index if not exists
     try:
         await db["codes"].create_index("code", unique=True)
         await db["codes"].create_index("expires_at")
