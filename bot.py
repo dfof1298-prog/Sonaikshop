@@ -1,4 +1,5 @@
 # SONIK MAIN BOT - COMPLETE VERSION WITH FIXED /REDEEM COMMAND
+# Fixed: datetime timezone comparison error in /redeem
 # Fixed: /redeem command now works for all users
 # Added: Code system with /code and /redeem
 # Enhanced: Performance optimizations for high load
@@ -274,8 +275,15 @@ async def redeem_code(user_id, code):
     if code_data.get("used", False):
         return {"success": False, "message": "Code already used"}
     
-    if code_data.get("expires_at", datetime.now(timezone.utc)) < datetime.now(timezone.utc):
-        return {"success": False, "message": "Code expired"}
+    # Fix: Compare timezone-aware datetimes properly
+    expires_at = code_data.get("expires_at")
+    if expires_at:
+        # If expires_at is naive, make it aware
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        # Compare with current time (which is timezone-aware)
+        if expires_at < datetime.now(timezone.utc):
+            return {"success": False, "message": "Code expired"}
     
     # Check if user already has active subscription
     if await is_user_subscribed(user_id):
@@ -1130,7 +1138,7 @@ async def generate_code_cmd(event):
 
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]redeem\b'))
 async def redeem_code_cmd(event):
-    """User command to redeem a subscription code - FIXED to work for all users"""
+    """User command to redeem a subscription code - FIXED timezone issue"""
     if await check_maintenance(event):
         return
     
@@ -1144,14 +1152,6 @@ async def redeem_code_cmd(event):
         t, e = banned_user_message()
         return await styled_reply(event, t, emoji_ids=e)
     
-    # Check if user already has active subscription
-    if await is_user_subscribed(uid):
-        return await styled_reply(event, f"""{PE} <b>{bs('Already Subscribed')}</b> {PE}
-<b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('You already have an active subscription')}</b>
-{PE} <i>{bs('You cannot redeem a code while subscribed')}</i>
-{PE} <i>{bs('Wait for your subscription to expire')}</i>""", emoji_ids=[CE["warn"], CE["warn"], CE["info"]])
-    
     # Parse command
     parts = event.raw_text.split()
     if len(parts) < 2:
@@ -1164,8 +1164,8 @@ async def redeem_code_cmd(event):
     
     code = parts[1].strip().upper()
     
-    # Check if code exists and is valid
     try:
+        # Check if code exists and is valid
         code_data = await db["codes"].find_one({"code": code})
         
         if not code_data:
@@ -1180,8 +1180,15 @@ async def redeem_code_cmd(event):
 {PE} <b>{bs('This code has already been redeemed')}</b>
 {PE} <i>{bs('Used by another user')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
         
-        if code_data.get("expires_at", datetime.now(timezone.utc)) < datetime.now(timezone.utc):
-            return await styled_reply(event, f"""{PE} <b>{bs('Code Expired')}</b> {PE}
+        # FIX: Handle timezone properly
+        expires_at = code_data.get("expires_at")
+        if expires_at:
+            # If expires_at is naive, make it aware
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            # Compare with current time (which is timezone-aware)
+            if expires_at < datetime.now(timezone.utc):
+                return await styled_reply(event, f"""{PE} <b>{bs('Code Expired')}</b> {PE}
 <b>━━━━━━━━━━━━━━━━━</b>
 {PE} <b>{bs('This code has expired')}</b>
 {PE} <i>{bs('Please contact admin for a new code')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
@@ -1193,6 +1200,13 @@ async def redeem_code_cmd(event):
 {PE} <b>{bs('You are an admin')}</b>
 {PE} <i>{bs('Admins already have full access')}</i>
 {PE} <i>{bs('Use /give to give subscriptions to users')}</i>""", emoji_ids=[CE["crown"], CE["crown"], CE["info"]])
+        
+        # Check if user already has active subscription
+        if await is_user_subscribed(uid):
+            return await styled_reply(event, f"""{PE} <b>{bs('Already Subscribed')}</b> {PE}
+<b>━━━━━━━━━━━━━━━━━</b>
+{PE} <b>{bs('You already have an active subscription')}</b>
+{PE} <i>{bs('Wait for your subscription to expire')}</i>""", emoji_ids=[CE["warn"], CE["warn"], CE["info"]])
         
         # Redeem the code
         result = await redeem_code(uid, code)
