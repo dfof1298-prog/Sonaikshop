@@ -1,8 +1,7 @@
-# SONIK MAIN BOT - COMPLETE VERSION WITH ENHANCEMENTS
-# Added: All working gateways accepted (except Authorize.Net and Checkout.com)
-# Fixed: Price filtering starts from 0.50 USD
-# Fixed: 3ds_required classified as Approved
-# Fixed: /unban command works properly
+# SONIK MAIN BOT - COMPLETE VERSION WITH CODE/REDEEM SYSTEM
+# Added: /code and /redeem commands
+# Enhanced: Performance optimizations for high load
+# Added: Code generation and redemption system
 
 from telethon.errors import FloodWaitError
 from telethon import TelegramClient, events, Button
@@ -18,6 +17,7 @@ import time
 import json
 import re
 import logging
+import string
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
 from telethon.errors import UserNotParticipantError
@@ -54,12 +54,12 @@ API_BASE_URL = "https://deadline-shopify-production-2b43.up.railway.app/shopify"
 # Payment bot username
 PAYMENT_BOT_USERNAME = "Stars838bot"
 
-# Worker Configuration
-SP_PER_USER_WORKERS = 30
-MSP_PER_USER_WORKERS = 40
-SITE_PER_USER_WORKERS = 30
-PROXY_PER_USER_WORKERS = 50
-BIN_WORKERS = 20
+# Worker Configuration - INCREASED for better performance
+SP_PER_USER_WORKERS = 50  # Increased from 30
+MSP_PER_USER_WORKERS = 60  # Increased from 40
+SITE_PER_USER_WORKERS = 50  # Increased from 30
+PROXY_PER_USER_WORKERS = 80  # Increased from 50
+BIN_WORKERS = 30  # Increased from 20
 
 # Timeout Configuration
 API_TIMEOUT = 60
@@ -71,12 +71,20 @@ PROXY_CHECK_BATCH = 50
 HIT_DELAY = 1.5
 MAX_CARDS_MASS = 5000
 
+# Code System Settings
+CODE_EXPIRY_HOURS = 24  # Codes expire after 24 hours
+
 # Client
 client = TelegramClient('sonik_main', API_ID, API_HASH)
 client_instance = client
 
 _USER_SEMS = {}
 _BIN_SEM = asyncio.Semaphore(BIN_WORKERS)
+
+# BIN Cache for performance
+_BIN_CACHE = {}
+_BIN_CACHE_TIME = {}
+_BIN_CACHE_TTL = 3600  # 1 hour cache
 
 # Gateway settings - REJECT Authorize.Net AND Checkout.com ONLY
 REJECTED_GATEWAYS = ['authorize.net', 'authorize', 'checkout.com', 'checkout','Checkout.com - Onsite Payments']
@@ -192,7 +200,7 @@ async def get_user_http_session(uid, purpose="general"):
     session = _USER_HTTP_SESSIONS.get(key)
     if session is None or session.closed:
         connector = aiohttp.TCPConnector(
-            limit=150, limit_per_host=50, ttl_dns_cache=300,
+            limit=200, limit_per_host=80, ttl_dns_cache=300,
             use_dns_cache=True, keepalive_timeout=30, enable_cleanup_closed=True,
         )
         session = aiohttp.ClientSession(
@@ -214,20 +222,84 @@ async def cleanup_user_http_session(uid, purpose="general"):
 async def get_bin_session():
     global _GLOBAL_BIN_SESSION
     if _GLOBAL_BIN_SESSION is None or _GLOBAL_BIN_SESSION.closed:
+        connector = aiohttp.TCPConnector(limit=80, limit_per_host=30)
         _GLOBAL_BIN_SESSION = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=BIN_TIMEOUT, connect=5),
-            connector=aiohttp.TCPConnector(limit=50, limit_per_host=20)
+            connector=connector
         )
     return _GLOBAL_BIN_SESSION
 
 async def get_proxy_session():
     global _GLOBAL_PROXY_SESSION
     if _GLOBAL_PROXY_SESSION is None or _GLOBAL_PROXY_SESSION.closed:
+        connector = aiohttp.TCPConnector(limit=150, limit_per_host=50)
         _GLOBAL_PROXY_SESSION = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=PROXY_TIMEOUT, connect=8),
-            connector=aiohttp.TCPConnector(limit=100, limit_per_host=30)
+            connector=connector
         )
     return _GLOBAL_PROXY_SESSION
+
+# ====================== CODE SYSTEM ======================
+def generate_code(length=8):
+    """Generate a random code for subscription"""
+    chars = string.ascii_uppercase + string.digits
+    return ''.join(random.choices(chars, k=length))
+
+async def create_subscription_code(admin_id, hours):
+    """Create a new subscription code"""
+    code = generate_code()
+    expiry = datetime.now(timezone.utc) + timedelta(hours=CODE_EXPIRY_HOURS)
+    
+    code_data = {
+        "code": code,
+        "hours": hours,
+        "created_by": admin_id,
+        "created_at": datetime.now(timezone.utc),
+        "expires_at": expiry,
+        "used": False,
+        "used_by": None,
+        "used_at": None
+    }
+    
+    await db["codes"].insert_one(code_data)
+    return code
+
+async def redeem_code(user_id, code):
+    """Redeem a subscription code for a user"""
+    code_data = await db["codes"].find_one({"code": code.upper()})
+    
+    if not code_data:
+        return {"success": False, "message": "Invalid code"}
+    
+    if code_data.get("used", False):
+        return {"success": False, "message": "Code already used"}
+    
+    if code_data.get("expires_at", datetime.now(timezone.utc)) < datetime.now(timezone.utc):
+        return {"success": False, "message": "Code expired"}
+    
+    # Update code as used
+    await db["codes"].update_one(
+        {"code": code.upper()},
+        {"$set": {
+            "used": True,
+            "used_by": user_id,
+            "used_at": datetime.now(timezone.utc)
+        }}
+    )
+    
+    # Give subscription to user
+    hours = code_data.get("hours", 1)
+    await set_user_subscription(user_id, "code_redeem", hours)
+    
+    return {
+        "success": True,
+        "message": f"Subscription added! {hours} hours",
+        "hours": hours
+    }
+
+async def get_code_info(code):
+    """Get information about a code"""
+    return await db["codes"].find_one({"code": code.upper()})
 
 # ====================== SMART ROTATOR ======================
 class SmartRotator:
@@ -678,16 +750,42 @@ async def test_proxies_batch(proxies_list):
     return results
 
 async def get_bin_info(cn):
+    """Get BIN info with caching for performance"""
+    global _BIN_CACHE, _BIN_CACHE_TIME
+    
+    bin_prefix = cn[:6]
+    
+    # Check cache first
+    if bin_prefix in _BIN_CACHE:
+        cache_time = _BIN_CACHE_TIME.get(bin_prefix, 0)
+        if time.time() - cache_time < _BIN_CACHE_TTL:
+            return _BIN_CACHE[bin_prefix]
+    
     try:
         s = await get_bin_session()
         async with _BIN_SEM:
-            async with s.get(f'https://bins.antipublic.cc/bins/{cn[:6]}') as r:
+            async with s.get(f'https://bins.antipublic.cc/bins/{bin_prefix}') as r:
                 if r.status != 200:
-                    return {"brand": "-", "type": "-", "level": "-", "bank": "-", "country": "-", "flag": "🏳️"}
-                d = await r.json(content_type=None)
-                return {"brand": d.get('brand', '-'), "type": d.get('type', '-'), "level": d.get('level', '-'), "bank": d.get('bank', '-'), "country": d.get('country_name', '-'), "flag": d.get('country_flag', '🏳️')}
+                    result = {"brand": "-", "type": "-", "level": "-", "bank": "-", "country": "-", "flag": "🏳️"}
+                else:
+                    d = await r.json(content_type=None)
+                    result = {
+                        "brand": d.get('brand', '-'),
+                        "type": d.get('type', '-'),
+                        "level": d.get('level', '-'),
+                        "bank": d.get('bank', '-'),
+                        "country": d.get('country_name', '-'),
+                        "flag": d.get('country_flag', '🏳️')
+                    }
+                # Cache the result
+                _BIN_CACHE[bin_prefix] = result
+                _BIN_CACHE_TIME[bin_prefix] = time.time()
+                return result
     except:
-        return {"brand": "-", "type": "-", "level": "-", "bank": "-", "country": "-", "flag": "🏳️"}
+        result = {"brand": "-", "type": "-", "level": "-", "bank": "-", "country": "-", "flag": "🏳️"}
+        _BIN_CACHE[bin_prefix] = result
+        _BIN_CACHE_TIME[bin_prefix] = time.time()
+        return result
 
 # ====================== SHOPIFY API ======================
 def build_api_url(site, cc, proxy_data=None):
@@ -951,8 +1049,10 @@ async def start(event):
 
 {PE} <b><i>{bs('Account')}</i></b>
 |   {PE} <code>/info</code> ━ <b>{bs('Profile')}</b>
+|   {PE} <code>/redeem</code> ━ <b>{bs('Redeem Code')}</b>
 
 {PE} <b><i>{bs('Admin')}</i></b>
+|   {PE} <code>/code</code> ━ <b>{bs('Generate Code')}</b>
 |   {PE} <code>/ban</code> ━ <b>{bs('Block user')}</b>
 |   {PE} <code>/unblock</code> ━ <b>{bs('Unblock user')}</b>
 |   {PE} <code>/users</code> ━ <b>{bs('All users')}</b>
@@ -962,6 +1062,7 @@ async def start(event):
 |   {PE} <code>/resetsites</code> ━ <b>{bs('Clear sites')}</b>
 |   {PE} <code>/maintenance on/off</code> ━ <b>{bs('Maintenance')}</b>
 |   {PE} <code>/stop</code> ━ <b>{bs('Stop mass')}</b>
+|   {PE} <code>/codes</code> ━ <b>{bs('List codes')}</b>
 <b>━━━━━━━━━━━━━━━━━</b>
 {status_line}"""
         
@@ -986,6 +1087,166 @@ async def check_joined_cb(event):
         await styled_send(event.chat_id, f"{PE} <b>{bs('Welcome to Sonik')}</b> {PE}\n{PE} <code>/start</code> <b>{bs('for commands')}</b>", emoji_ids=[CE["fire"], CE["fire"], CE["info"]])
     else:
         await event.answer(f"❌ {bs('Not joined')}!", alert=True)
+
+# ====================== CODE COMMANDS ======================
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]code\b'))
+async def generate_code_cmd(event):
+    """Admin command to generate subscription codes"""
+    if event.sender_id not in ADMIN_ID:
+        return await styled_reply(event, f"{PE} <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
+    
+    if await check_maintenance(event):
+        return
+    
+    parts = event.raw_text.split()
+    if len(parts) < 2:
+        return await styled_reply(event, f"""{PE} <b>{bs('Generate Code')}</b> {PE}
+<b>━━━━━━━━━━━━━━━━━</b>
+{PE} <code>/code hours</code>
+{PE} <i>{bs('Example: /code 24')}</i>
+{PE} <i>{bs('Generates a code for 24 hours subscription')}</i>
+<b>━━━━━━━━━━━━━━━━━</b>
+{PE} <b>{bs('Codes expire in')}:</b> <code>{CODE_EXPIRY_HOURS}h</code>""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["star"]])
+    
+    try:
+        hours = int(parts[1])
+        if hours <= 0:
+            return await styled_reply(event, f"{PE} <b>{bs('Hours must be positive')}</b>", emoji_ids=[CE["cross"]])
+        
+        code = await create_subscription_code(event.sender_id, hours)
+        
+        await styled_reply(event, f"""{PE} <b>{bs('Code Generated')}</b> {PE}
+<b>━━━━━━━━━━━━━━━━━</b>
+{PE} <b>{bs('Code')}:</b> <code>{code}</code>
+{PE} <b>{bs('Hours')}:</b> <code>{hours}h</code>
+{PE} <b>{bs('Expires In')}:</b> <code>{CODE_EXPIRY_HOURS}h</code>
+<b>━━━━━━━━━━━━━━━━━</b>
+{PE} <i>{bs('Share this code with users')}</i>
+{PE} <i>{bs('They can use: /redeem CODE')}</i>""", emoji_ids=[CE["gift"], CE["gift"], CE["star"], CE["gem"], CE["info"]])
+        
+    except ValueError:
+        await styled_reply(event, f"{PE} <b>{bs('Invalid hours')}</b>", emoji_ids=[CE["cross"]])
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]redeem\b'))
+async def redeem_code_cmd(event):
+    """User command to redeem a subscription code"""
+    if await check_maintenance(event):
+        return
+    
+    if not await force_join_check(event):
+        return
+    
+    uid = event.sender_id
+    
+    if await is_banned_user(uid):
+        t, e = banned_user_message()
+        return await styled_reply(event, t, emoji_ids=e)
+    
+    parts = event.raw_text.split()
+    if len(parts) < 2:
+        return await styled_reply(event, f"""{PE} <b>{bs('Redeem Code')}</b> {PE}
+<b>━━━━━━━━━━━━━━━━━</b>
+{PE} <code>/redeem CODE</code>
+{PE} <i>{bs('Example: /redeem ABC12345')}</i>
+<b>━━━━━━━━━━━━━━━━━</b>
+{PE} <i>{bs('Enter the code you received')}</i>""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["star"]])
+    
+    code = parts[1].strip().upper()
+    
+    # Check if code exists and is valid
+    code_data = await db["codes"].find_one({"code": code})
+    
+    if not code_data:
+        return await styled_reply(event, f"""{PE} <b>{bs('Invalid Code')}</b> {PE}
+<b>━━━━━━━━━━━━━━━━━</b>
+{PE} <b>{bs('The code does not exist')}</b>
+{PE} <i>{bs('Please check and try again')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
+    
+    if code_data.get("used", False):
+        return await styled_reply(event, f"""{PE} <b>{bs('Code Already Used')}</b> {PE}
+<b>━━━━━━━━━━━━━━━━━</b>
+{PE} <b>{bs('This code has already been redeemed')}</b>
+{PE} <i>{bs('Used by another user')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
+    
+    if code_data.get("expires_at", datetime.now(timezone.utc)) < datetime.now(timezone.utc):
+        return await styled_reply(event, f"""{PE} <b>{bs('Code Expired')}</b> {PE}
+<b>━━━━━━━━━━━━━━━━━</b>
+{PE} <b>{bs('This code has expired')}</b>
+{PE} <i>{bs('Please contact admin for a new code')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
+    
+    # Check if user already has active subscription
+    if await is_user_subscribed(uid):
+        return await styled_reply(event, f"""{PE} <b>{bs('Already Subscribed')}</b> {PE}
+<b>━━━━━━━━━━━━━━━━━</b>
+{PE} <b>{bs('You already have an active subscription')}</b>
+{PE} <i>{bs('You cannot redeem a code while subscribed')}</i>""", emoji_ids=[CE["warn"], CE["warn"], CE["info"]])
+    
+    # Redeem the code
+    result = await redeem_code(uid, code)
+    
+    if result["success"]:
+        # Notify admins
+        try:
+            sender = await event.get_sender()
+            name = sender.first_name or "User"
+            for admin in ADMIN_ID:
+                await styled_send(admin, f"""✅ <b>Code Redeemed!</b>
+<b>━━━━━━━━━━━━━━━━━</b>
+<b>User:</b> <code>{uid}</code>
+<b>Name:</b> {name}
+<b>Code:</b> <code>{code}</code>
+<b>Hours:</b> <code>{result['hours']}h</code>
+<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}""", emoji_ids=[CE["check"], CE["gift"]])
+        except:
+            pass
+        
+        await styled_reply(event, f"""{PE} <b>{bs('Code Redeemed Successfully!')}</b> {PE}
+<b>━━━━━━━━━━━━━━━━━</b>
+{PE} <b>{bs('Subscription Added')}</b>
+{PE} <b>{bs('Hours')}:</b> <code>{result['hours']}h</code>
+<b>━━━━━━━━━━━━━━━━━</b>
+{PE} <i>{bs('You can now use all bot features')}</i>
+{PE} <code>/start</code> {bs('to see commands')}""", emoji_ids=[CE["gift"], CE["gift"], CE["check"], CE["star"], CE["info"]])
+    else:
+        await styled_reply(event, f"""{PE} <b>{bs('Failed to Redeem')}</b> {PE}
+<b>━━━━━━━━━━━━━━━━━</b>
+{PE} <b>{bs('Error')}:</b> <code>{result['message']}</code>
+{PE} <i>{bs('Please try again or contact admin')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]codes$'))
+async def list_codes_cmd(event):
+    """Admin command to list all codes"""
+    if event.sender_id not in ADMIN_ID:
+        return await styled_reply(event, f"{PE} <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
+    
+    codes = await db["codes"].find().sort("created_at", -1).to_list(length=50)
+    
+    if not codes:
+        return await styled_reply(event, f"{PE} <b>{bs('No codes found')}</b>\n{PE} <code>/code hours</code> {bs('to generate')}", emoji_ids=[CE["warn"]])
+    
+    text = f"""{PE} <b>{bs('Recent Codes')}</b> ({len(codes)}) {PE}
+<b>━━━━━━━━━━━━━━━━━</b>
+"""
+    
+    for code_data in codes[:20]:
+        code = code_data.get('code', '?')
+        hours = code_data.get('hours', '?')
+        used = "✅" if code_data.get('used', False) else "⬜"
+        created_by = code_data.get('created_by', '?')
+        expires = code_data.get('expires_at')
+        if expires:
+            expires_str = expires.strftime('%m-%d %H:%M')
+        else:
+            expires_str = '?'
+        
+        text += f"{PE} {used} <code>{code}</code> ━ {hours}h ━ {expires_str}\n"
+    
+    if len(codes) > 20:
+        text += f"\n<i>+{len(codes)-20} more</i>"
+    
+    text += f"\n<b>━━━━━━━━━━━━━━━━━</b>\n{PE} ✅ Used | ⬜ Available"
+    
+    await styled_reply(event, text, emoji_ids=[CE["fire"], CE["fire"], CE["gift"]])
 
 # ====================== SITE MANAGEMENT ======================
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]add\b'))
@@ -1557,7 +1818,8 @@ async def info_cmd(event):
 {PE} <b>{bs('Status')}:</b> <code>{status_text}</code>
 {PE} <b>{bs('Proxies')}:</b> <code>{pc}/{bs('1000')}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>@{PAYMENT_BOT_USERNAME}</b> {bs('to subscribe')}""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["star"], CE["shield"], CE["link"]] + se)
+{PE} <b>@{PAYMENT_BOT_USERNAME}</b> {bs('to subscribe')}
+{PE} <code>/redeem</code> {bs('to use a code')}""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["star"], CE["shield"], CE["link"]] + se)
 
 # ====================== ADMIN COMMANDS ======================
 @client.on(events.NewMessage(pattern=r'(?i)^[/.](maintenance|maintance)\s+(on|off)$'))
@@ -1782,6 +2044,11 @@ async def stats_cmd(event):
         ch = await get_charged_count()
         ap = await get_approved_count()
         sites_count = await get_total_sites_count()
+        
+        # Get code stats
+        total_codes = await db["codes"].count_documents({})
+        used_codes = await db["codes"].count_documents({"used": True})
+        
         await styled_reply(event, f"""{PE} <b>{bs('Sonik Statistics')}</b> {PE}
 <b>━━━━━━━━━━━━━━━━━</b>
 {PE} <b>{bs('Users')}:</b> <code>{tu}</code>
@@ -1790,6 +2057,8 @@ async def stats_cmd(event):
 {PE} <b>{bs('Charged')}:</b> <code>{ch}</code>
 {PE} <b>{bs('Approved')}:</b> <code>{ap}</code>
 {PE} <b>{bs('Sites')}:</b> <code>{sites_count}</code>
+{PE} <b>{bs('Codes Generated')}:</b> <code>{total_codes}</code>
+{PE} <b>{bs('Codes Used')}:</b> <code>{used_codes}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
 {PE} <b>{bs('MSP Active')}:</b> <code>{len(ACTIVE_MTXT_PROCESSES)}</code> ({MSP_PER_USER_WORKERS}w)""", emoji_ids=[CE["fire"], CE["fire"], CE["chart"], CE["link"], CE["gem"], CE["star"], CE["brain"], CE["shield"]])
     except Exception as e:
@@ -2109,6 +2378,28 @@ async def cleanup_expired_loop():
             count = await cleanup_expired_subscriptions()
             if count > 0:
                 log_system("CLEANUP", f"Cleaned {count} expired subscriptions")
+            
+            # Clean up expired codes
+            expired_codes = await db["codes"].delete_many({
+                "expires_at": {"$lt": datetime.now(timezone.utc)},
+                "used": False
+            })
+            if expired_codes.deleted_count > 0:
+                log_system("CLEANUP", f"Cleaned {expired_codes.deleted_count} expired codes")
+            
+            # Clean old BIN cache
+            global _BIN_CACHE, _BIN_CACHE_TIME
+            now = time.time()
+            keys_to_remove = []
+            for key, cache_time in _BIN_CACHE_TIME.items():
+                if now - cache_time > _BIN_CACHE_TTL * 2:  # Clear after 2x TTL
+                    keys_to_remove.append(key)
+            for key in keys_to_remove:
+                _BIN_CACHE.pop(key, None)
+                _BIN_CACHE_TIME.pop(key, None)
+            if keys_to_remove:
+                log_system("CLEANUP", f"Cleaned {len(keys_to_remove)} BIN cache entries")
+            
         except Exception as e:
             log_system("CLEANUP", f"Error: {e}", "error")
         await asyncio.sleep(3600)
@@ -2118,6 +2409,15 @@ async def main():
     global MAIN_BOT_USERNAME, client_instance
     log_system("BOOT", "Initializing database...")
     await init_db()
+    
+    # Create codes collection index if not exists
+    try:
+        await db["codes"].create_index("code", unique=True)
+        await db["codes"].create_index("expires_at")
+        await db["codes"].create_index("used")
+    except:
+        pass
+    
     log_system("BOOT", "Starting cleanup loop...")
     asyncio.create_task(cleanup_expired_loop())
     while True:
@@ -2131,6 +2431,7 @@ async def main():
             log_system("BOOT", "✅ Enhanced features: All gateways except Authorize.Net and Checkout.com accepted")
             log_system("BOOT", "✅ Price filtering from 0.50 USD")
             log_system("BOOT", "✅ 3ds_required classified as Approved")
+            log_system("BOOT", "✅ Code system enabled: /code and /redeem")
             await client.run_until_disconnected()
         except FloodWaitError as e:
             log_system("FLOOD", f"Sleeping {e.seconds+5}s", "warning")
