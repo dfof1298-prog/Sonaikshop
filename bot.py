@@ -56,7 +56,7 @@ PAYMENT_BOT_USERNAME = "Stars838bot"
 
 # Worker Configuration
 SP_PER_USER_WORKERS = 30
-MSP_PER_USER_WORKERS = 50
+MSP_PER_USER_WORKERS = 40
 SITE_PER_USER_WORKERS = 30
 PROXY_PER_USER_WORKERS = 50
 BIN_WORKERS = 20
@@ -79,7 +79,7 @@ _USER_SEMS = {}
 _BIN_SEM = asyncio.Semaphore(BIN_WORKERS)
 
 # Gateway settings - REJECT Authorize.Net AND Checkout.com ONLY
-REJECTED_GATEWAYS = ['authorize.net', 'authorize', 'checkout.com', 'checkout']
+REJECTED_GATEWAYS = ['authorize.net', 'authorize', 'checkout.com', 'checkout','Checkout.com - Onsite Payments']
 
 PRICE_RANGES = {
     "1": {"name": "0.50-5 USD", "min": 0.50, "max": 5},
