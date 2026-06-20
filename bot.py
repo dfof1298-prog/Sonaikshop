@@ -1,7 +1,9 @@
-# SONIK MAIN BOT - COMPLETE VERSION WITH ALL FIXES
+# SONIK MAIN BOT - COMPLETE VERSION WITH ALL FIXES & INTERACTIVE BUTTONS
 # Added: Rejected responses filter (dead sites)
-# Added: Increased timeout for slow sites (25s)
-# Added: High load support (300+ users)
+# Added: Increased timeout for slow sites (30s)
+# Added: Proxy requirement for /sp and /msp
+# Added: Interactive menu buttons
+# Added: Venom theme with special emojis
 # Fixed: detect_payment_gateway now rejects dead responses
 # Fixed: /redeem timezone issue
 # Enhanced: Connection limits for better performance
@@ -57,15 +59,15 @@ API_BASE_URL = "https://shopify-api-all-production.up.railway.app/shopify"
 # Payment bot username
 PAYMENT_BOT_USERNAME = "Stars838bot"
 
-# Worker Configuration - INCREASED for high load (300+ users)
-SP_PER_USER_WORKERS = 80
-MSP_PER_USER_WORKERS = 100
-SITE_PER_USER_WORKERS = 80
-PROXY_PER_USER_WORKERS = 120
-BIN_WORKERS = 50
+# Worker Configuration - REDUCED for API stability
+SP_PER_USER_WORKERS = 50
+MSP_PER_USER_WORKERS = 60
+SITE_PER_USER_WORKERS = 50
+PROXY_PER_USER_WORKERS = 80
+BIN_WORKERS = 30
 
 # Timeout Configuration - INCREASED for slow sites
-API_TIMEOUT = 90
+API_TIMEOUT = 120
 BIN_TIMEOUT = 60
 PROXY_TIMEOUT = 8
 PROXY_CHECK_BATCH = 50
@@ -92,6 +94,17 @@ _BIN_CACHE_TTL = 3600
 # Gateway settings - REJECT Authorize.Net AND Checkout.com ONLY
 REJECTED_GATEWAYS = ['authorize.net', 'authorize', 'checkout.com', 'checkout', 'Checkout.com - Onsite Payments']
 
+# ====================== ACCEPTED RESPONSES ======================
+# Only these responses will be accepted in /add and /site
+ACCEPTED_RESPONSES = [
+    '3ds_required',
+    'insufficient_funds',
+    'card_declined',
+    'order_paid',
+    'charged',
+    'payment successful'
+]
+
 # ====================== REJECTED RESPONSES ======================
 # These responses indicate dead sites - will be rejected in /add and /site
 REJECTED_RESPONSES = [
@@ -101,6 +114,7 @@ REJECTED_RESPONSES = [
     'no valid payment method found',
     'unable to get payment token',
     'cart failed with status 429',
+    'cart failed with status 503',
     'checkout token not found',
     'checkout token is empty'
 ]
@@ -397,6 +411,7 @@ SITE_ERROR_KEYWORDS = [
     'no valid payment method found',
     'unable to get payment token',
     'cart failed with status 429',
+    'cart failed with status 503',
 ]
 
 PROXY_ERROR_KEYWORDS = ['proxy dead', 'proxy error', 'proxy timeout', 'proxy connection failed']
@@ -429,7 +444,7 @@ async def detect_payment_gateway(site, proxy_data=None, http_session=None):
     try:
         url = build_api_url(site if site.startswith('http') else f'https://{site}', test_card, proxy_data)
         s = http_session or (await get_user_http_session(0, "site"))
-        async with s.get(url, timeout=25) as resp:  # Increased to 25s for slow sites
+        async with s.get(url, timeout=30) as resp:
             if resp.status != 200:
                 return 'dead'
             try:
@@ -440,8 +455,18 @@ async def detect_payment_gateway(site, proxy_data=None, http_session=None):
             rm = str(raw.get('Response', '')).lower()
             gw = str(raw.get('Gate', raw.get('Gateway', ''))).lower()
             
+            # ===== CHECK ACCEPTED RESPONSES =====
+            # Only accept sites with specific responses
+            accepted_found = False
+            for accepted in ACCEPTED_RESPONSES:
+                if accepted in rm:
+                    accepted_found = True
+                    break
+            
+            if not accepted_found:
+                return 'dead'
+            
             # ===== REJECT DEAD RESPONSES =====
-            # If any rejected response is found, reject the site immediately
             for rejected in REJECTED_RESPONSES:
                 if rejected in rm:
                     return 'dead'
@@ -467,7 +492,7 @@ async def get_site_product_price(site, proxy_data=None, http_session=None):
     try:
         url = build_api_url(site if site.startswith('http') else f'https://{site}', test_card, proxy_data)
         s = http_session or (await get_user_http_session(0, "site"))
-        async with s.get(url, timeout=25) as resp:  # Increased to 25s for slow sites
+        async with s.get(url, timeout=30) as resp:
             if resp.status != 200:
                 return None
             try:
@@ -618,11 +643,11 @@ async def force_join_check(event):
         [pbtn(bs("Join Channel"), url=JOIN_CHANNEL_LINK)],
         [pbtn(bs("I have joined"), data="check_joined")]
     ]
-    text = f"""{PE} <b>{bs('Access Locked')}</b> {PE}
+    text = f"""🕷️ <b>{bs('Access Locked')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('Join to Unlock')}</b>
+🖤 <b>{bs('Join to Unlock')}</b>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('Channel')}:</b> <i>{bs('ReGict7')}</i>
+🖤 <b>{bs('Channel')}:</b> <i>{bs('ReGict7')}</i>
 <b>━━━━━━━━━━━━━━━━━</b>"""
     await styled_reply(event, text, buttons=buttons, emoji_ids=[CE["fire"], CE["fire"], CE["stop"], CE["link"]])
     return False
@@ -654,7 +679,7 @@ async def get_maintenance_mode():
 
 async def check_maintenance(event):
     if await get_maintenance_mode() and event.sender_id not in ADMIN_ID:
-        await styled_reply(event, f"{PE} <b>{bs('Maintenance')}</b> {PE}\n<b>━━━━━━━━━━━━━━━━━</b>\n{PE} <b>{bs('Bot under maintenance')}</b>\n{PE} <i>{bs('Try again later')}</i>", emoji_ids=[CE["stop"], CE["stop"], CE["warn"], CE["info"]])
+        await styled_reply(event, f"🕷️ <b>{bs('Maintenance')}</b> 🕷️\n<b>━━━━━━━━━━━━━━━━━</b>\n🖤 <b>{bs('Bot under maintenance')}</b>\n🖤 <i>{bs('Try again later')}</i>", emoji_ids=[CE["stop"], CE["stop"], CE["warn"], CE["info"]])
         return True
     return False
 
@@ -682,20 +707,20 @@ async def require_subscription(event):
     return False
 
 async def send_no_subscription_message(event):
-    text = f"""{PE} <b>{bs('Access Denied')}</b> {PE}
+    text = f"""🕷️ <b>{bs('Access Denied')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('No Active Subscription')}</b>
-{PE} <i>{bs('Subscribe using the payment bot:')}</i>
+🖤 <b>{bs('No Active Subscription')}</b>
+🖤 <i>{bs('Subscribe using the payment bot:')}</i>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>@{PAYMENT_BOT_USERNAME}</b>
-{PE} <code>/subscribe</code> {bs('to buy a plan')}"""
+🖤 <b>@{PAYMENT_BOT_USERNAME}</b>
+🖤 <code>/subscribe</code> {bs('to buy a plan')}"""
     await styled_reply(event, text, emoji_ids=[CE["stop"], CE["stop"], CE["warn"], CE["info"], CE["link"]])
 
 def banned_user_message():
-    return f"""{PE} <b>{bs('Banned')}</b> {PE}
+    return f"""🕷️ <b>{bs('Banned')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('You are banned from using Sonik')}</b>
-{PE} <b>{bs('Appeal')}:</b> <i>{bs('Contact Admin')}</i>""", [CE["stop"], CE["stop"], CE["warn"], CE["info"]]
+🖤 <b>{bs('You are banned from using Sonik')}</b>
+🖤 <b>{bs('Appeal')}:</b> <i>{bs('Contact Admin')}</i>""", [CE["stop"], CE["stop"], CE["warn"], CE["info"]]
 
 # ====================== UTILITIES ======================
 def extract_cc(text):
@@ -948,20 +973,20 @@ async def test_site(site, proxy_data=None, http_session=None):
 # ====================== CARD FORMATTING ======================
 def format_simple_card_result(status, card, gateway, response, bin_info=None, elapsed=0.0, extra_field=None):
     sm = {
-        "Charged": (f"<b>{bs('CHARGED')}</b> {PE}", [CE["fire"]]),
-        "Approved": (f"<b>{bs('APPROVED')}</b> {PE}", [CE["check"]]),
-        "Declined": (f"<b>{bs('DECLINED')}</b> {PE}", [CE["declined"]]),
-        "Error": (f"<b>{bs('ERROR')}</b> {PE}", [CE["cross"]])
+        "Charged": (f"🖤 <b>{bs('CHARGED')}</b> 🕷️", [CE["fire"]]),
+        "Approved": (f"✅ <b>{bs('APPROVED')}</b> ⚡", [CE["check"]]),
+        "Declined": (f"❌ <b>{bs('DECLINED')}</b> 🕷️", [CE["declined"]]),
+        "Error": (f"⚠️ <b>{bs('ERROR')}</b> 🖤", [CE["cross"]])
     }
     h, he = sm.get(status, sm["Declined"])
     bi = bin_info or {"brand": "-", "type": "-", "level": "-", "bank": "-", "country": "-", "flag": "🏳️"}
     el = f"\n<b>{bs(extra_field[0])}</b> ━ <code>{extra_field[1]}</code>" if extra_field else ""
     return f"""{h}
 <b>━━━━━━━━━━━━━━━━━</b>
-<a href='https://t.me/ISoonik'>⊀</a> <b>{bs('Card')}</b>
+🕷️ <b>{bs('Card')}</b>
 ⤷ <code>{card}</code>
-<b>{bs('Gateway')}</b> ━ <code>{gateway}</code>
-<b>{bs('Response')}</b> ━ <code>{response}</code>{el}
+🖤 <b>{bs('Gateway')}</b> ━ <code>{gateway}</code>
+⚡ <b>{bs('Response')}</b> ━ <code>{response}</code>{el}
 <b>━━━━━━━━━━━━━━━━━</b>
 <b>{bs('BIN')}:</b> <code>{bi.get('brand', '-')} | {bi.get('type', '-')} | {bi.get('level', '-')}</code>
 <b>{bs('Bank')}:</b> <code>{bi.get('bank', '-')}</code>
@@ -971,21 +996,21 @@ def format_simple_card_result(status, card, gateway, response, bin_info=None, el
 
 def format_card_result(status, card, gateway, response, price="-", site="-", bin_info=None, elapsed=0.0):
     sm = {
-        "Charged": (f"<b>{bs('CHARGED')}</b> {PE}", [CE["fire"]]),
-        "Approved": (f"<b>{bs('APPROVED')}</b> {PE}", [CE["check"]]),
-        "Declined": (f"<b>{bs('DECLINED')}</b> {PE}", [CE["declined"]]),
-        "Error": (f"<b>{bs('ERROR')}</b> {PE}", [CE["cross"]])
+        "Charged": (f"🖤 <b>{bs('CHARGED')}</b> 🕷️", [CE["fire"]]),
+        "Approved": (f"✅ <b>{bs('APPROVED')}</b> ⚡", [CE["check"]]),
+        "Declined": (f"❌ <b>{bs('DECLINED')}</b> 🕷️", [CE["declined"]]),
+        "Error": (f"⚠️ <b>{bs('ERROR')}</b> 🖤", [CE["cross"]])
     }
     h, he = sm.get(status, sm["Declined"])
     bi = bin_info or {"brand": "-", "type": "-", "level": "-", "bank": "-", "country": "-", "flag": "🏳️"}
     ps = f"${str(price).replace('$', '')}" if price and price != "-" else "-"
     return f"""{h}
 <b>━━━━━━━━━━━━━━━━━</b>
-<a href='https://t.me/ISoonik'>⊀</a> <b>{bs('Card')}</b>
+🕷️ <b>{bs('Card')}</b>
 ⤷ <code>{card}</code>
-<b>{bs('Gateway')}</b> ━ <code>{gateway}</code>
-<b>{bs('Response')}</b> ━ <code>{response}</code>
-<b>{bs('Price')}</b> ━ <code>{ps}</code>
+🖤 <b>{bs('Gateway')}</b> ━ <code>{gateway}</code>
+⚡ <b>{bs('Response')}</b> ━ <code>{response}</code>
+💵 <b>{bs('Price')}</b> ━ <code>{ps}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
 <b>{bs('BIN')}:</b> <code>{bi.get('brand', '-')} | {bi.get('type', '-')} | {bi.get('level', '-')}</code>
 <b>{bs('Bank')}:</b> <code>{bi.get('bank', '-')}</code>
@@ -1001,12 +1026,12 @@ async def send_channel_hit(res, uid, username, name):
             prof = f"https://t.me/{username}" if username and not username.startswith("user_") else f"tg://user?id={uid}"
             gw = res.get('Gateway', 'Shopify')
             resp = res.get('Response', '')
-            msg = f"""<b>{bs('HIT')} ➛ {bs(sv)}</b> {PE}
+            msg = f"""🖤 <b>{bs('HIT')} ➛ {bs(sv)}</b> 🕷️
 <b>{bs('Gateway')} ➛ {gw}</b>
-<b>{bs('Response')} ➛ {resp}</b>
-<b>{bs('Price')} ➛ {res.get('Price', '-')}</b>
-<b>{bs('User')} ➛ <a href="{prof}">{name}</a></b>"""
-            HIT_BUTTON = [[Button.url(bs("Sonik"), f"https://t.me/{MAIN_BOT_USERNAME}")]]
+⚡ <b>{bs('Response')} ➛ {resp}</b>
+💵 <b>{bs('Price')} ➛ {res.get('Price', '-')}</b>
+🕷️ <b>{bs('User')} ➛ <a href="{prof}">{name}</a></b>"""
+            HIT_BUTTON = [[Button.url(bs("Venom"), f"https://t.me/{MAIN_BOT_USERNAME}")]]
             await styled_send(HIT_CHANNEL_ID, msg, buttons=HIT_BUTTON, emoji_ids=[CE["fire"]])
     except:
         pass
@@ -1032,7 +1057,7 @@ async def start(event):
                         name = sender.first_name or "No name"
                         username = f"@{sender.username}" if sender.username else "No username"
                         for admin in ADMIN_ID:
-                            await styled_send(admin, f"""📢 <b>New User!</b>
+                            await styled_send(admin, f"""🕷️ <b>New User!</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
 <b>ID:</b> <code>{uid}</code>
 <b>Name:</b> {name}
@@ -1051,114 +1076,147 @@ async def start(event):
         sub = await get_user_subscription(uid)
         
         if uid in ADMIN_ID:
-            status_line = f"{PE} <b>{bs('STATUS')}</b> ━ 👑 <b>{bs('ADMIN')}</b> {PE}"
+            status_line = f"🕷️ <b>{bs('STATUS')}</b> ━ 👑 <b>{bs('ADMIN')}</b> 🖤"
             se = [CE["crown"]]
         elif sub["is_active"]:
             remaining = sub["remaining_hours"]
             remaining_str = f"{int(remaining * 60)} min" if remaining < 1 else f"{remaining:.1f} h"
-            status_line = f"{PE} <b>{bs('STATUS')}</b> ━ ✅ <b>{bs('Active')}</b> {PE} | {remaining_str}"
+            status_line = f"🕷️ <b>{bs('STATUS')}</b> ━ ✅ <b>{bs('Active')}</b> ⚡ | {remaining_str}"
             se = [CE["check"]]
         else:
-            status_line = f"{PE} <b>{bs('STATUS')}</b> ━ ❌ {bs('No Subscription')}"
+            status_line = f"🕷️ <b>{bs('STATUS')}</b> ━ ❌ {bs('No Subscription')}"
             se = [CE["cross"]]
         
-        text = f"""{PE} <b><i>{bs('Sonik')}</i></b> {PE}
+        text = f"""🕷️ <b><i>{bs('Venom Chk')}</i></b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b><i>{bs('Shopify Checker')}</i></b>
-|   {PE} <code>/sp</code> ━ <b>{bs('Single CC')}</b>
-|   {PE} <code>/msp</code> ━ <b>{bs('Mass CC')}</b>
-
-{PE} <b><i>{bs('Sites')}</i></b>
-|   {PE} <code>/add</code> ━ <b>{bs('Add sites')}</b>
-|   {PE} <code>/rm</code> ━ <b>{bs('Remove')}</b>
-|   {PE} <code>/sites</code> ━ <b>{bs('View')}</b>
-|   {PE} <code>/site</code> ━ <b>{bs('Test all')}</b>
-
-{PE} <b><i>{bs('Proxy')}</i></b>
-|   {PE} <code>/addpxy</code> ━ <b>{bs('Add')}</b>
-|   {PE} <code>/proxy</code> ━ <b>{bs('View')}</b>
-|   {PE} <code>/chkpxy</code> ━ <b>{bs('Test')}</b>
-|   {PE} <code>/rmpxy</code> ━ <b>{bs('Remove')}</b>
-
-{PE} <b><i>{bs('Account')}</i></b>
-|   {PE} <code>/info</code> ━ <b>{bs('Profile')}</b>
-|   {PE} <code>/redeem</code> ━ <b>{bs('Redeem Code')}</b>
-
-{PE} <b><i>{bs('Admin')}</i></b>
-|   {PE} <code>/code</code> ━ <b>{bs('Generate Code')}</b>
-|   {PE} <code>/ban</code> ━ <b>{bs('Block user')}</b>
-|   {PE} <code>/unblock</code> ━ <b>{bs('Unblock user')}</b>
-|   {PE} <code>/users</code> ━ <b>{bs('All users')}</b>
-|   {PE} <code>/broadcast</code> ━ <b>{bs('Send message to all')}</b>
-|   {PE} <code>/give</code> ━ <b>{bs('Give sub')}</b>
-|   {PE} <code>/stats</code> ━ <b>{bs('Statistics')}</b>
-|   {PE} <code>/resetsites</code> ━ <b>{bs('Clear sites')}</b>
-|   {PE} <code>/maintenance on/off</code> ━ <b>{bs('Maintenance')}</b>
-|   {PE} <code>/stop</code> ━ <b>{bs('Stop mass')}</b>
-|   {PE} <code>/codes</code> ━ <b>{bs('List codes')}</b>
+🖤 <b><i>{bs('Shopify Checker')}</i></b>
+⚡ <b>{bs('Total Gateways')}:</b> <code>12</code>
+🕷️ <b>{bs('Total Tools')}:</b> <code>4</code>
 <b>━━━━━━━━━━━━━━━━━</b>
-{status_line}"""
+{status_line}
+<b>━━━━━━━━━━━━━━━━━</b>
+🖤 <b>{bs('Developer')}:</b> <i>@im_porto</i>"""
         
-        kb = [[pbtn(bs("Subscribe"), url=f"https://t.me/{PAYMENT_BOT_USERNAME}"), pbtn(bs("Support"), url="https://t.me/ISoonik")],
-              [pbtn(bs("Channel"), url=JOIN_CHANNEL_LINK)]]
+        kb = [
+            [pbtn("🛍️ Gateways", "menu_gateways"), pbtn("🔧 Tools", "menu_tools")],
+            [pbtn("🌐 Proxies", "menu_proxies"), pbtn("🔙 Back", "menu_back")],
+            [pbtn(bs("Subscribe"), url=f"https://t.me/{PAYMENT_BOT_USERNAME}"), pbtn(bs("Support"), url="https://t.me/ISoonik")],
+            [pbtn(bs("Channel"), url=JOIN_CHANNEL_LINK)]
+        ]
         ei = [CE["bolt"], CE["bolt"], CE["search"], CE["pin"], CE["fire"], CE["brain"], CE["shield"], CE["link"], CE["eyes"], CE["trash"], CE["info"], CE["crown"]] + se
         await styled_reply(event, text, buttons=kb, emoji_ids=ei)
     except Exception as e:
         log_user(event.sender_id, "START_ERROR", f"Error={e}", "error")
 
-@client.on(events.CallbackQuery(data=b"check_joined"))
-async def check_joined_cb(event):
+# ====================== MENU BUTTONS ======================
+@client.on(events.CallbackQuery(data=b"menu_gateways"))
+async def menu_gateways_cb(event):
+    await event.answer("🛍️ Gateways: Shopify, Stripe, Braintree, PayPal, Adyen, Square, Worldpay, Klarna, Afterpay, and more!", alert=True)
+
+@client.on(events.CallbackQuery(data=b"menu_tools"))
+async def menu_tools_cb(event):
+    text = """🕷️ <b>{bs('Tools')}</b> 🕷️
+<b>━━━━━━━━━━━━━━━━━</b>
+⚡ <code>/sp</code> ━ <b>{bs('Single CC Check')}</b>
+🖤 <code>/msp</code> ━ <b>{bs('Mass CC Check')}</b>
+🕷️ <code>/addpxy</code> ━ <b>{bs('Add Proxies')}</b>
+⚡ <code>/proxy</code> ━ <b>{bs('View Proxies')}</b>
+<b>━━━━━━━━━━━━━━━━━</b>
+🕷️ {bs('Use these commands to check cards')}"""
+    await styled_send(event.chat_id, text, emoji_ids=[CE["fire"], CE["fire"], CE["info"]])
+    await event.answer("🔧 Tools menu opened!", alert=False)
+
+@client.on(events.CallbackQuery(data=b"menu_proxies"))
+async def menu_proxies_cb(event):
+    text = """🌐 <b>{bs('Proxies')}</b> 🕷️
+<b>━━━━━━━━━━━━━━━━━</b>
+⚡ <code>/addpxy</code> ━ <b>{bs('Add proxies')}</b>
+🖤 <code>/proxy</code> ━ <b>{bs('View proxies')}</b>
+🕷️ <code>/rmpxy</code> ━ <b>{bs('Remove proxy')}</b>
+⚡ <code>/chkpxy</code> ━ <b>{bs('Test proxies')}</b>
+<b>━━━━━━━━━━━━━━━━━</b>
+🕷️ {bs('Add proxies before using /sp or /msp')}"""
+    await styled_send(event.chat_id, text, emoji_ids=[CE["shield"], CE["shield"], CE["info"]])
+    await event.answer("🌐 Proxies menu opened!", alert=False)
+
+@client.on(events.CallbackQuery(data=b"menu_back"))
+async def menu_back_cb(event):
+    await event.delete()
+    # Re-send the start menu
     uid = event.sender_id
+    await ensure_user(uid)
+    sub = await get_user_subscription(uid)
+    
     if uid in ADMIN_ID:
-        return await event.answer(f"✅ {bs('Admin')}!")
-    if await is_user_joined(uid):
-        await event.answer(f"✅ {bs('Verified')}!", alert=True)
-        try:
-            await event.delete()
-        except:
-            pass
-        await styled_send(event.chat_id, f"{PE} <b>{bs('Welcome to Sonik')}</b> {PE}\n{PE} <code>/start</code> <b>{bs('for commands')}</b>", emoji_ids=[CE["fire"], CE["fire"], CE["info"]])
+        status_line = f"🕷️ <b>{bs('STATUS')}</b> ━ 👑 <b>{bs('ADMIN')}</b> 🖤"
+        se = [CE["crown"]]
+    elif sub["is_active"]:
+        remaining = sub["remaining_hours"]
+        remaining_str = f"{int(remaining * 60)} min" if remaining < 1 else f"{remaining:.1f} h"
+        status_line = f"🕷️ <b>{bs('STATUS')}</b> ━ ✅ <b>{bs('Active')}</b> ⚡ | {remaining_str}"
+        se = [CE["check"]]
     else:
-        await event.answer(f"❌ {bs('Not joined')}!", alert=True)
+        status_line = f"🕷️ <b>{bs('STATUS')}</b> ━ ❌ {bs('No Subscription')}"
+        se = [CE["cross"]]
+    
+    text = f"""🕷️ <b><i>{bs('Venom Chk')}</i></b> 🕷️
+<b>━━━━━━━━━━━━━━━━━</b>
+🖤 <b><i>{bs('Shopify Checker')}</i></b>
+⚡ <b>{bs('Total Gateways')}:</b> <code>12</code>
+🕷️ <b>{bs('Total Tools')}:</b> <code>4</code>
+<b>━━━━━━━━━━━━━━━━━</b>
+{status_line}
+<b>━━━━━━━━━━━━━━━━━</b>
+🖤 <b>{bs('Developer')}:</b> <i>@im_porto</i>"""
+    
+    kb = [
+        [pbtn("🛍️ Gateways", "menu_gateways"), pbtn("🔧 Tools", "menu_tools")],
+        [pbtn("🌐 Proxies", "menu_proxies"), pbtn("🔙 Back", "menu_back")],
+        [pbtn(bs("Subscribe"), url=f"https://t.me/{PAYMENT_BOT_USERNAME}"), pbtn(bs("Support"), url="https://t.me/ISoonik")],
+        [pbtn(bs("Channel"), url=JOIN_CHANNEL_LINK)]
+    ]
+    ei = [CE["bolt"], CE["bolt"], CE["search"], CE["pin"], CE["fire"], CE["brain"], CE["shield"], CE["link"], CE["eyes"], CE["trash"], CE["info"], CE["crown"]] + se
+    await styled_send(event.chat_id, text, buttons=kb, emoji_ids=ei)
+    await event.answer("🔙 Back to main menu!", alert=False)
 
 # ====================== CODE COMMANDS ======================
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]code\b'))
 async def generate_code_cmd(event):
     """Admin command to generate subscription codes"""
     if event.sender_id not in ADMIN_ID:
-        return await styled_reply(event, f"{PE} <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
     
     if await check_maintenance(event):
         return
     
     parts = event.raw_text.split()
     if len(parts) < 2:
-        return await styled_reply(event, f"""{PE} <b>{bs('Generate Code')}</b> {PE}
+        return await styled_reply(event, f"""🕷️ <b>{bs('Generate Code')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <code>/code hours</code>
-{PE} <i>{bs('Example: /code 24')}</i>
-{PE} <i>{bs('Generates a code for 24 hours subscription')}</i>
+🖤 <code>/code hours</code>
+⚡ <i>{bs('Example: /code 24')}</i>
+🕷️ <i>{bs('Generates a code for 24 hours subscription')}</i>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('Codes expire in')}:</b> <code>{CODE_EXPIRY_HOURS}h</code>""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["star"]])
+🖤 <b>{bs('Codes expire in')}:</b> <code>{CODE_EXPIRY_HOURS}h</code>""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["star"]])
     
     try:
         hours = int(parts[1])
         if hours <= 0:
-            return await styled_reply(event, f"{PE} <b>{bs('Hours must be positive')}</b>", emoji_ids=[CE["cross"]])
+            return await styled_reply(event, f"🖤 <b>{bs('Hours must be positive')}</b>", emoji_ids=[CE["cross"]])
         
         code = await create_subscription_code(event.sender_id, hours)
         
-        await styled_reply(event, f"""{PE} <b>{bs('Code Generated')}</b> {PE}
+        await styled_reply(event, f"""🕷️ <b>{bs('Code Generated')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('Code')}:</b> <code>{code}</code>
-{PE} <b>{bs('Hours')}:</b> <code>{hours}h</code>
-{PE} <b>{bs('Expires In')}:</b> <code>{CODE_EXPIRY_HOURS}h</code>
+🖤 <b>{bs('Code')}:</b> <code>{code}</code>
+⚡ <b>{bs('Hours')}:</b> <code>{hours}h</code>
+🕷️ <b>{bs('Expires In')}:</b> <code>{CODE_EXPIRY_HOURS}h</code>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <i>{bs('Share this code with users')}</i>
-{PE} <i>{bs('They can use: /redeem CODE')}</i>""", emoji_ids=[CE["gift"], CE["gift"], CE["star"], CE["gem"], CE["info"]])
+🖤 <i>{bs('Share this code with users')}</i>
+⚡ <i>{bs('They can use: /redeem CODE')}</i>""", emoji_ids=[CE["gift"], CE["gift"], CE["star"], CE["gem"], CE["info"]])
         
     except ValueError:
-        await styled_reply(event, f"{PE} <b>{bs('Invalid hours')}</b>", emoji_ids=[CE["cross"]])
+        await styled_reply(event, f"🖤 <b>{bs('Invalid hours')}</b>", emoji_ids=[CE["cross"]])
 
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]redeem\b'))
 async def redeem_code_cmd(event):
@@ -1179,64 +1237,56 @@ async def redeem_code_cmd(event):
     # Parse command
     parts = event.raw_text.split()
     if len(parts) < 2:
-        return await styled_reply(event, f"""{PE} <b>{bs('Redeem Code')}</b> {PE}
+        return await styled_reply(event, f"""🕷️ <b>{bs('Redeem Code')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <code>/redeem CODE</code>
-{PE} <i>{bs('Example: /redeem ABC12345')}</i>
+🖤 <code>/redeem CODE</code>
+⚡ <i>{bs('Example: /redeem ABC12345')}</i>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <i>{bs('Enter the code you received from admin')}</i>""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["star"]])
+🕷️ <i>{bs('Enter the code you received from admin')}</i>""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["star"]])
     
     code = parts[1].strip().upper()
     
     try:
-        # Check if code exists and is valid
         code_data = await db["codes"].find_one({"code": code})
         
         if not code_data:
-            return await styled_reply(event, f"""{PE} <b>{bs('Invalid Code')}</b> {PE}
+            return await styled_reply(event, f"""🕷️ <b>{bs('Invalid Code')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('The code does not exist')}</b>
-{PE} <i>{bs('Please check and try again')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
+🖤 <b>{bs('The code does not exist')}</b>
+⚡ <i>{bs('Please check and try again')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
         
         if code_data.get("used", False):
-            return await styled_reply(event, f"""{PE} <b>{bs('Code Already Used')}</b> {PE}
+            return await styled_reply(event, f"""🕷️ <b>{bs('Code Already Used')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('This code has already been redeemed')}</b>
-{PE} <i>{bs('Used by another user')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
+🖤 <b>{bs('This code has already been redeemed')}</b>
+⚡ <i>{bs('Used by another user')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
         
-        # FIX: Handle timezone properly
         expires_at = code_data.get("expires_at")
         if expires_at:
-            # If expires_at is naive, make it aware
             if expires_at.tzinfo is None:
                 expires_at = expires_at.replace(tzinfo=timezone.utc)
-            # Compare with current time (which is timezone-aware)
             if expires_at < datetime.now(timezone.utc):
-                return await styled_reply(event, f"""{PE} <b>{bs('Code Expired')}</b> {PE}
+                return await styled_reply(event, f"""🕷️ <b>{bs('Code Expired')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('This code has expired')}</b>
-{PE} <i>{bs('Please contact admin for a new code')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
+🖤 <b>{bs('This code has expired')}</b>
+⚡ <i>{bs('Please contact admin for a new code')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
         
-        # Admin users cannot redeem codes (they already have access)
         if uid in ADMIN_ID:
-            return await styled_reply(event, f"""{PE} <b>{bs('Admin Access')}</b> {PE}
+            return await styled_reply(event, f"""🕷️ <b>{bs('Admin Access')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('You are an admin')}</b>
-{PE} <i>{bs('Admins already have full access')}</i>
-{PE} <i>{bs('Use /give to give subscriptions to users')}</i>""", emoji_ids=[CE["crown"], CE["crown"], CE["info"]])
+👑 <b>{bs('You are an admin')}</b>
+🖤 <i>{bs('Admins already have full access')}</i>
+⚡ <i>{bs('Use /give to give subscriptions to users')}</i>""", emoji_ids=[CE["crown"], CE["crown"], CE["info"]])
         
-        # Check if user already has active subscription
         if await is_user_subscribed(uid):
-            return await styled_reply(event, f"""{PE} <b>{bs('Already Subscribed')}</b> {PE}
+            return await styled_reply(event, f"""🕷️ <b>{bs('Already Subscribed')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('You already have an active subscription')}</b>
-{PE} <i>{bs('Wait for your subscription to expire')}</i>""", emoji_ids=[CE["warn"], CE["warn"], CE["info"]])
+🖤 <b>{bs('You already have an active subscription')}</b>
+⚡ <i>{bs('Wait for your subscription to expire')}</i>""", emoji_ids=[CE["warn"], CE["warn"], CE["info"]])
         
-        # Redeem the code
         result = await redeem_code(uid, code)
         
         if result["success"]:
-            # Notify admins
             try:
                 sender = await event.get_sender()
                 name = sender.first_name or "User"
@@ -1251,40 +1301,40 @@ async def redeem_code_cmd(event):
             except:
                 pass
             
-            await styled_reply(event, f"""{PE} <b>{bs('Code Redeemed Successfully!')}</b> {PE}
+            await styled_reply(event, f"""🕷️ <b>{bs('Code Redeemed Successfully!')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('Subscription Added')}</b>
-{PE} <b>{bs('Hours')}:</b> <code>{result['hours']}h</code>
+🖤 <b>{bs('Subscription Added')}</b>
+⚡ <b>{bs('Hours')}:</b> <code>{result['hours']}h</code>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <i>{bs('You can now use all bot features')}</i>
-{PE} <code>/start</code> {bs('to see commands')}""", emoji_ids=[CE["gift"], CE["gift"], CE["check"], CE["star"], CE["info"]])
+🕷️ <i>{bs('You can now use all bot features')}</i>
+⚡ <code>/start</code> {bs('to see commands')}""", emoji_ids=[CE["gift"], CE["gift"], CE["check"], CE["star"], CE["info"]])
         else:
-            await styled_reply(event, f"""{PE} <b>{bs('Failed to Redeem')}</b> {PE}
+            await styled_reply(event, f"""🕷️ <b>{bs('Failed to Redeem')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('Error')}:</b> <code>{result['message']}</code>
-{PE} <i>{bs('Please try again or contact admin')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
+🖤 <b>{bs('Error')}:</b> <code>{result['message']}</code>
+⚡ <i>{bs('Please try again or contact admin')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
             
     except Exception as e:
         log_user(uid, "REDEEM_ERROR", f"Error: {e}", "error")
-        await styled_reply(event, f"""{PE} <b>{bs('Error')}</b> {PE}
+        await styled_reply(event, f"""🕷️ <b>{bs('Error')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('An error occurred')}</b>
-{PE} <code>{str(e)[:100]}</code>
-{PE} <i>{bs('Please try again or contact admin')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
+🖤 <b>{bs('An error occurred')}</b>
+⚡ <code>{str(e)[:100]}</code>
+🕷️ <i>{bs('Please try again or contact admin')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
 
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]codes$'))
 async def list_codes_cmd(event):
     """Admin command to list all codes"""
     if event.sender_id not in ADMIN_ID:
-        return await styled_reply(event, f"{PE} <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
     
     try:
         codes = await db["codes"].find().sort("created_at", -1).to_list(length=50)
         
         if not codes:
-            return await styled_reply(event, f"{PE} <b>{bs('No codes found')}</b>\n{PE} <code>/code hours</code> {bs('to generate')}", emoji_ids=[CE["warn"]])
+            return await styled_reply(event, f"🕷️ <b>{bs('No codes found')}</b>\n🖤 <code>/code hours</code> {bs('to generate')}", emoji_ids=[CE["warn"]])
         
-        text = f"""{PE} <b>{bs('Recent Codes')}</b> ({len(codes)}) {PE}
+        text = f"""🕷️ <b>{bs('Recent Codes')}</b> ({len(codes)}) 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
 """
         
@@ -1299,22 +1349,22 @@ async def list_codes_cmd(event):
             else:
                 expires_str = '?'
             
-            text += f"{PE} {used} <code>{code}</code> ━ {hours}h ━ {expires_str}\n"
+            text += f"🕷️ {used} <code>{code}</code> ━ {hours}h ━ {expires_str}\n"
         
         if len(codes) > 20:
             text += f"\n<i>+{len(codes)-20} more</i>"
         
-        text += f"\n<b>━━━━━━━━━━━━━━━━━</b>\n{PE} ✅ Used | ⬜ Available"
+        text += f"\n<b>━━━━━━━━━━━━━━━━━</b>\n🖤 ✅ Used | ⬜ Available"
         
         await styled_reply(event, text, emoji_ids=[CE["fire"], CE["fire"], CE["gift"]])
     except Exception as e:
-        await styled_reply(event, f"{PE} <b>{bs('Error')}:</b> <code>{e}</code>", emoji_ids=[CE["cross"]])
+        await styled_reply(event, f"🖤 <b>{bs('Error')}:</b> <code>{e}</code>", emoji_ids=[CE["cross"]])
 
 # ====================== SITE MANAGEMENT ======================
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]add\b'))
 async def add_site(event):
     if event.sender_id not in ADMIN_ID:
-        return await styled_reply(event, f"{PE} <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
     if await check_maintenance(event):
         return
     if not await force_join_check(event):
@@ -1340,12 +1390,12 @@ async def add_site(event):
         if add_text:
             sites_list.extend(extract_urls_from_text(add_text))
         if not sites_list:
-            return await styled_reply(event, f"""{PE} <b>{bs('Add Site')}</b> {PE}
+            return await styled_reply(event, f"""🕷️ <b>{bs('Add Site')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <code>/add site.com</code>
-{PE} <i>{bs('Or reply to a .txt file')}</i>
+🖤 <code>/add site.com</code>
+⚡ <i>{bs('Or reply to a .txt file')}</i>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <i>{bs('Working Shopify sites only (dead sites rejected)')}</i>""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["link"]])
+🕷️ <i>{bs('Working Shopify sites only (dead sites rejected)')}</i>""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["link"]])
         sites_list = list(dict.fromkeys(sites_list))
         existing_sites = await get_global_sites()
         existing_norm = {normalize_site_url(s) for s in existing_sites}
@@ -1358,7 +1408,7 @@ async def add_site(event):
             else:
                 new_sites.append(norm)
         if not new_sites:
-            return await styled_reply(event, f"{PE} <b>{bs('All sites already exist')}</b> {PE}\n{PE} <b>{bs('Duplicates')}:</b> <code>{len(already_exists)}</code>", emoji_ids=[CE["warn"], CE["warn"], CE["info"]])
+            return await styled_reply(event, f"🕷️ <b>{bs('All sites already exist')}</b> 🕷️\n🖤 <b>{bs('Duplicates')}:</b> <code>{len(already_exists)}</code>", emoji_ids=[CE["warn"], CE["warn"], CE["info"]])
         PENDING_ADD_SITES[event.sender_id] = {"sites": new_sites, "exists": already_exists, "event": event}
         kb = [
             [pbtn(f"{bs('0.50-5 USD')}", f"add_price_range:1:{event.sender_id}"), pbtn(f"{bs('0.50-10 USD')}", f"add_price_range:2:{event.sender_id}")],
@@ -1366,16 +1416,16 @@ async def add_site(event):
             [pbtn(f"{bs('5-10 USD')}", f"add_price_range:5:{event.sender_id}"), pbtn(f"{bs('5-20 USD')}", f"add_price_range:6:{event.sender_id}")],
             [pbtn(f"{bs('10-20 USD')}", f"add_price_range:7:{event.sender_id}"), pbtn(f"{bs('20-40 USD')}", f"add_price_range:8:{event.sender_id}")],
         ]
-        await styled_reply(event, f"""{PE} <b>{bs('Select Price Range')}</b> {PE}
+        await styled_reply(event, f"""🕷️ <b>{bs('Select Price Range')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('New Sites')}:</b> <code>{len(new_sites)}</code>
-{PE} <b>{bs('Already Exist')}:</b> <code>{len(already_exists)}</code>
+🖤 <b>{bs('New Sites')}:</b> <code>{len(new_sites)}</code>
+⚡ <b>{bs('Already Exist')}:</b> <code>{len(already_exists)}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <i>{bs('Only working Shopify sites will be added (dead sites rejected)')}</i>
-{PE} <i>{bs('Sites with price above range will be excluded')}</i>""", buttons=kb, emoji_ids=[CE["fire"], CE["fire"], CE["globe"], CE["warn"], CE["info"]])
+🕷️ <i>{bs('Only working Shopify sites will be added (dead sites rejected)')}</i>
+🖤 <i>{bs('Sites with price above range will be excluded')}</i>""", buttons=kb, emoji_ids=[CE["fire"], CE["fire"], CE["globe"], CE["warn"], CE["info"]])
 
     except Exception as e:
-        await styled_reply(event, f"{PE} <b>{bs('Error')}:</b> <code>{e}</code>", emoji_ids=[CE["cross"]])
+        await styled_reply(event, f"🖤 <b>{bs('Error')}:</b> <code>{e}</code>", emoji_ids=[CE["cross"]])
 
 @client.on(events.CallbackQuery(pattern=rb"add_price_range:(\d+):(\d+)"))
 async def add_price_range_cb(event):
@@ -1406,7 +1456,7 @@ async def _process_add_sites_with_filter(event, new_sites, already_exists, price
     proxies = await get_all_user_proxies(uid)
     user_site_sem = get_user_sem(uid, "site")
     http_session = await get_user_http_session(uid, "site")
-    sm = await styled_reply(event, f"{PE} <b>{bs('Testing')} {total} {bs('sites')}...</b>", emoji_ids=[CE["fire"]])
+    sm = await styled_reply(event, f"🕷️ <b>{bs('Testing')} {total} {bs('sites')}...</b>", emoji_ids=[CE["fire"]])
     
     async def test_and_add(site):
         nonlocal tested, working, dead, added, price_filtered, rejected_gateway
@@ -1431,7 +1481,7 @@ async def _process_add_sites_with_filter(event, new_sites, already_exists, price
                 
                 if tested % 10 == 0 or tested == total:
                     try:
-                        await styled_edit(sm, f"{PE} <b>{bs('Testing')}...</b> {tested}/{total} | ✅{working} ❌{dead} | 🚫{rejected_gateway} | +{added} | 💰{price_filtered}", emoji_ids=[CE["fire"]])
+                        await styled_edit(sm, f"🕷️ <b>{bs('Testing')}...</b> {tested}/{total} | ✅{working} ❌{dead} | 🚫{rejected_gateway} | +{added} | 💰{price_filtered}", emoji_ids=[CE["fire"]])
                     except:
                         pass
             except:
@@ -1441,18 +1491,18 @@ async def _process_add_sites_with_filter(event, new_sites, already_exists, price
     for i in range(0, len(new_sites), SITE_PER_USER_WORKERS):
         await asyncio.gather(*[asyncio.create_task(test_and_add(s)) for s in new_sites[i:i+SITE_PER_USER_WORKERS]], return_exceptions=True)
     
-    await styled_edit(sm, f"""{PE} <b>{bs('Add Sites Complete')}</b> {PE}
+    await styled_edit(sm, f"""🕷️ <b>{bs('Add Sites Complete')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('Tested')}:</b> <code>{tested}</code>
-{PE} <b>{bs('Working (Shopify)')}:</b> <code>{working}</code>
-{PE} <b>{bs('Dead')}:</b> <code>{dead}</code>
-{PE} <b>{bs('Rejected (Dead/Error/Invalid Response)')}:</b> <code>{rejected_gateway}</code>
-{PE} <b>{bs('Price Filtered')}:</b> <code>{price_filtered}</code>
+🖤 <b>{bs('Tested')}:</b> <code>{tested}</code>
+⚡ <b>{bs('Working (Shopify)')}:</b> <code>{working}</code>
+🕷️ <b>{bs('Dead')}:</b> <code>{dead}</code>
+🖤 <b>{bs('Rejected (Dead/Error/Invalid Response)')}:</b> <code>{rejected_gateway}</code>
+⚡ <b>{bs('Price Filtered')}:</b> <code>{price_filtered}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('Added')} (${price_range['min']}-${price_range['max']}):</b> <code>{added}</code>
-{PE} <b>{bs('Already Existed')}:</b> <code>{len(already_exists)}</code>
+🕷️ <b>{bs('Added')} (${price_range['min']}-${price_range['max']}):</b> <code>{added}</code>
+🖤 <b>{bs('Already Existed')}:</b> <code>{len(already_exists)}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <i>{bs('Only working Shopify sites are accepted (dead sites rejected)')}</i>""", emoji_ids=[CE["check"], CE["check"], CE["globe"], CE["fire"], CE["cross"], CE["chart"], CE["warn"], CE["info"]])
+⚡ <i>{bs('Only working Shopify sites are accepted (dead sites rejected)')}</i>""", emoji_ids=[CE["check"], CE["check"], CE["globe"], CE["fire"], CE["cross"], CE["chart"], CE["warn"], CE["info"]])
     
     await cleanup_user_http_session(uid, "site")
     cleanup_user_sem(uid)
@@ -1460,7 +1510,7 @@ async def _process_add_sites_with_filter(event, new_sites, already_exists, price
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]rm\b'))
 async def remove_site(event):
     if event.sender_id not in ADMIN_ID:
-        return await styled_reply(event, f"{PE} <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
     if await check_maintenance(event):
         return
     if not await force_join_check(event):
@@ -1468,12 +1518,12 @@ async def remove_site(event):
     rt = re.sub(r'^[/.]rm\s*', '', event.raw_text, flags=re.IGNORECASE).strip()
     if rt.lower() == 'all':
         c = await clear_all_global_sites()
-        return await styled_reply(event, f"{PE} <b>{bs('Removed')} {c} {bs('sites')}</b>", emoji_ids=[CE["check"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('Removed')} {c} {bs('sites')}</b>", emoji_ids=[CE["check"]])
     if not rt:
-        return await styled_reply(event, f"{PE} <code>/rm site.com</code> {bs('or')} <code>/rm all</code>", emoji_ids=[CE["info"]])
+        return await styled_reply(event, f"🖤 <code>/rm site.com</code> {bs('or')} <code>/rm all</code>", emoji_ids=[CE["info"]])
     to_rm = extract_urls_from_text(rt)
     if not to_rm:
-        return await styled_reply(event, f"{PE} <b>{bs('No valid URLs')}</b>", emoji_ids=[CE["cross"]])
+        return await styled_reply(event, f"🖤 <b>{bs('No valid URLs')}</b>", emoji_ids=[CE["cross"]])
     existing = await get_global_sites()
     removed = []
     for s in to_rm:
@@ -1483,23 +1533,23 @@ async def remove_site(event):
                 if await remove_global_site(ex):
                     removed.append(ex)
                 break
-    await styled_reply(event, f"{PE} <b>{bs('Removed')}:</b> <code>{len(removed)}</code>", emoji_ids=[CE["check"]])
+    await styled_reply(event, f"🕷️ <b>{bs('Removed')}:</b> <code>{len(removed)}</code>", emoji_ids=[CE["check"]])
 
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]sites$'))
 async def list_sites(event):
     if event.sender_id not in ADMIN_ID:
-        return await styled_reply(event, f"{PE} <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
     if await check_maintenance(event):
         return
     if not await force_join_check(event):
         return
     sites = await get_global_sites()
     if not sites:
-        return await styled_reply(event, f"{PE} <b>{bs('No sites')}</b> <code>/add</code>", emoji_ids=[CE["warn"]])
-    text = f"{PE} <b>{bs('Global Sites')}</b> ({len(sites)}) {PE}\n<b>━━━━━━━━━━━━━━━━━</b>\n"
+        return await styled_reply(event, f"🕷️ <b>{bs('No sites')}</b> <code>/add</code>", emoji_ids=[CE["warn"]])
+    text = f"🕷️ <b>{bs('Global Sites')}</b> ({len(sites)}) 🕷️\n<b>━━━━━━━━━━━━━━━━━</b>\n"
     eid = [CE["fire"], CE["fire"]]
     for i, s in enumerate(sites[:50], 1):
-        text += f"{PE} <code>{i}.</code> <b>{s}</b>\n"
+        text += f"🖤 <code>{i}.</code> <b>{s}</b>\n"
         eid.append(CE["link"])
     if len(sites) > 50:
         text += f"\n<i>+{len(sites)-50} more</i>"
@@ -1508,14 +1558,14 @@ async def list_sites(event):
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]site\b'))
 async def check_sites_with_filter_cmd(event):
     if event.sender_id not in ADMIN_ID:
-        return await styled_reply(event, f"{PE} <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
     if await check_maintenance(event):
         return
     if not await force_join_check(event):
         return
     sites = await get_global_sites()
     if not sites:
-        return await styled_reply(event, f"{PE} <b>{bs('No sites')}</b>", emoji_ids=[CE["warn"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('No sites')}</b>", emoji_ids=[CE["warn"]])
     kb = [
         [pbtn(f"{bs('0.50-5 USD')}", f"site_price_range:1:{event.sender_id}"), pbtn(f"{bs('0.50-10 USD')}", f"site_price_range:2:{event.sender_id}")],
         [pbtn(f"{bs('0.50-20 USD')}", f"site_price_range:3:{event.sender_id}"), pbtn(f"{bs('0.50-40 USD')}", f"site_price_range:4:{event.sender_id}")],
@@ -1523,12 +1573,12 @@ async def check_sites_with_filter_cmd(event):
         [pbtn(f"{bs('10-20 USD')}", f"site_price_range:7:{event.sender_id}"), pbtn(f"{bs('20-40 USD')}", f"site_price_range:8:{event.sender_id}")],
         [pbtn(f"{bs('All Sites (No Filter)')}", f"site_price_range:0:{event.sender_id}")],
     ]
-    await styled_reply(event, f"""{PE} <b>{bs('Site Check with Filter')}</b> {PE}
+    await styled_reply(event, f"""🕷️ <b>{bs('Site Check with Filter')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('Total Sites')}:</b> <code>{len(sites)}</code>
+🖤 <b>{bs('Total Sites')}:</b> <code>{len(sites)}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <i>{bs('Select price range to filter')}</i>
-{PE} <i>{bs('Only working Shopify sites are kept (dead sites removed)')}</i>""", buttons=kb, emoji_ids=[CE["fire"], CE["fire"], CE["globe"], CE["info"]])
+⚡ <i>{bs('Select price range to filter')}</i>
+🕷️ <i>{bs('Only working Shopify sites are kept (dead sites removed)')}</i>""", buttons=kb, emoji_ids=[CE["fire"], CE["fire"], CE["globe"], CE["info"]])
 
 @client.on(events.CallbackQuery(pattern=rb"site_price_range:(\d+):(\d+)"))
 async def site_price_range_cb(event):
@@ -1560,7 +1610,7 @@ async def _process_site_check_with_filter(event, price_range):
     proxies = await get_all_user_proxies(uid)
     user_site_sem = get_user_sem(uid, "site")
     http_session = await get_user_http_session(uid, "site")
-    sm = await styled_reply(event, f"{PE} <b>{bs('Checking')} {total} {bs('sites')}...</b>", emoji_ids=[CE["fire"]])
+    sm = await styled_reply(event, f"🕷️ <b>{bs('Checking')} {total} {bs('sites')}...</b>", emoji_ids=[CE["fire"]])
     results = []
     
     async def check_worker(site):
@@ -1585,7 +1635,7 @@ async def _process_site_check_with_filter(event, price_range):
                 
                 if tested % 10 == 0 or tested == total:
                     try:
-                        await styled_edit(sm, f"{PE} <b>{bs('Checking')}...</b> {tested}/{total} | ✅{alive} ❌{dead} | 🚫{rejected_gateway} | {bs('Kept')}:{kept}", emoji_ids=[CE["fire"]])
+                        await styled_edit(sm, f"🕷️ <b>{bs('Checking')}...</b> {tested}/{total} | ✅{alive} ❌{dead} | 🚫{rejected_gateway} | {bs('Kept')}:{kept}", emoji_ids=[CE["fire"]])
                     except:
                         pass
             except:
@@ -1611,23 +1661,23 @@ async def _process_site_check_with_filter(event, price_range):
     top_sites_text = ""
     for i, r in enumerate(results[:20], 1):
         gw_flag = "🛍️" if r.get('gateway') == 'shopify' else "💳"
-        top_sites_text += f"{PE} <code>{i}.</code> {gw_flag} <b>{r['site']}</b> ━ <code>{r['price']}</code>\n"
+        top_sites_text += f"🕷️ <code>{i}.</code> {gw_flag} <b>{r['site']}</b> ━ <code>{r['price']}</code>\n"
     
-    await styled_edit(sm, f"""{PE} <b>{bs('Site Check Complete')}</b> {PE}
+    await styled_edit(sm, f"""🕷️ <b>{bs('Site Check Complete')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('Filter')}:</b> <code>{price_range['name']}</code>
-{PE} <b>{bs('Total Tested')}:</b> <code>{total}</code>
-{PE} <b>{bs('Alive (Shopify)')}:</b> <code>{alive}</code>
-{PE} <b>{bs('Dead')}:</b> <code>{dead}</code>
-{PE} <b>{bs('Rejected (Dead/Error/Invalid Response)')}:</b> <code>{rejected_gateway}</code>
-{PE} <b>{bs('Price Filtered Out')}:</b> <code>{price_filtered}</code>
-{PE} <b>{bs('Removed from sites.txt')}:</b> <code>{removed_count}</code>
-{PE} <b>{bs('Kept in sites.txt')}:</b> <code>{kept}</code>
+🖤 <b>{bs('Filter')}:</b> <code>{price_range['name']}</code>
+⚡ <b>{bs('Total Tested')}:</b> <code>{total}</code>
+🕷️ <b>{bs('Alive (Shopify)')}:</b> <code>{alive}</code>
+🖤 <b>{bs('Dead')}:</b> <code>{dead}</code>
+⚡ <b>{bs('Rejected (Dead/Error/Invalid Response)')}:</b> <code>{rejected_gateway}</code>
+🕷️ <b>{bs('Price Filtered Out')}:</b> <code>{price_filtered}</code>
+🖤 <b>{bs('Removed from sites.txt')}:</b> <code>{removed_count}</code>
+⚡ <b>{bs('Kept in sites.txt')}:</b> <code>{kept}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
 <b>{bs('Top Sites (Lowest Price)')}:</b>
 {top_sites_text if top_sites_text else 'None'}
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} 🛍️ = Shopify""", emoji_ids=[CE["check"], CE["check"], CE["fire"], CE["globe"], CE["cross"], CE["chart"], CE["star"]])
+🕷️ 🛍️ = Shopify""", emoji_ids=[CE["check"], CE["check"], CE["fire"], CE["globe"], CE["cross"], CE["chart"], CE["star"]])
     
     await cleanup_user_http_session(uid, "site")
     cleanup_user_sem(uid)
@@ -1640,7 +1690,7 @@ async def add_proxy_cmd(event):
     if not await force_join_check(event):
         return
     if event.is_group:
-        return await styled_reply(event, f"{PE} <b>{bs('Private only')}</b>", emoji_ids=[CE["stop"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('Private only')}</b>", emoji_ids=[CE["stop"]])
     if await is_banned_user(event.sender_id):
         t, e = banned_user_message()
         return await styled_reply(event, t, emoji_ids=e)
@@ -1667,12 +1717,12 @@ async def add_proxy_cmd(event):
             if len(p) == 2:
                 lines = [l.strip() for l in p[1].splitlines() if l.strip()]
             else:
-                return await styled_reply(event, f"{PE} <code>/addpxy ip:port:user:pass</code>", emoji_ids=[CE["info"]])
+                return await styled_reply(event, f"🖤 <code>/addpxy ip:port:user:pass</code>", emoji_ids=[CE["info"]])
         if not lines:
-            return await styled_reply(event, f"{PE} <b>{bs('No proxies')}</b>", emoji_ids=[CE["cross"]])
+            return await styled_reply(event, f"🕷️ <b>{bs('No proxies')}</b>", emoji_ids=[CE["cross"]])
         cc = await get_proxy_count(event.sender_id)
         if cc >= 1000:
-            return await styled_reply(event, f"{PE} <b>{bs('Limit 1000/1000')}</b>", emoji_ids=[CE["cross"]])
+            return await styled_reply(event, f"🕷️ <b>{bs('Limit 1000/1000')}</b>", emoji_ids=[CE["cross"]])
         existing = {p['proxy_url'] for p in await get_all_user_proxies(event.sender_id)}
         parsed = []
         for l in lines:
@@ -1681,9 +1731,9 @@ async def add_proxy_cmd(event):
                 parsed.append(pd)
                 existing.add(pd['proxy_url'])
         if not parsed:
-            return await styled_reply(event, f"{PE} <b>{bs('No valid proxies')}</b>", emoji_ids=[CE["cross"]])
+            return await styled_reply(event, f"🖤 <b>{bs('No valid proxies')}</b>", emoji_ids=[CE["cross"]])
         parsed = parsed[:1000-cc]
-        tm = await styled_reply(event, f"{PE} <b>{bs('Testing')} {len(parsed)}...</b>", emoji_ids=[CE["shield"]])
+        tm = await styled_reply(event, f"🕷️ <b>{bs('Testing')} {len(parsed)}...</b>", emoji_ids=[CE["shield"]])
         
         added, failed = [], []
         batch_size = PROXY_CHECK_BATCH
@@ -1697,9 +1747,9 @@ async def add_proxy_cmd(event):
                 else:
                     failed.append(1)
         
-        await styled_edit(tm, f"{PE} <b>{bs('Done')}</b> ✅{len(added)} ❌{len(failed)} | {bs('Total')}: {cc+len(added)}/1000", emoji_ids=[CE["fire"]])
+        await styled_edit(tm, f"🕷️ <b>{bs('Done')}</b> ✅{len(added)} ❌{len(failed)} | {bs('Total')}: {cc+len(added)}/1000", emoji_ids=[CE["fire"]])
     except Exception as e:
-        await styled_reply(event, f"{PE} <b>{bs('Error')}:</b> <code>{e}</code>", emoji_ids=[CE["cross"]])
+        await styled_reply(event, f"🖤 <b>{bs('Error')}:</b> <code>{e}</code>", emoji_ids=[CE["cross"]])
 
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]proxy$'))
 async def view_proxies(event):
@@ -1708,7 +1758,7 @@ async def view_proxies(event):
     if not await force_join_check(event):
         return
     if event.is_group:
-        return await styled_reply(event, f"{PE} <b>{bs('Private only')}</b>", emoji_ids=[CE["stop"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('Private only')}</b>", emoji_ids=[CE["stop"]])
     if await is_banned_user(event.sender_id):
         t, e = banned_user_message()
         return await styled_reply(event, t, emoji_ids=e)
@@ -1716,15 +1766,15 @@ async def view_proxies(event):
         return
     proxies = await get_all_user_proxies(event.sender_id)
     if not proxies:
-        return await styled_reply(event, f"{PE} <b>{bs('No proxies')}</b> <code>/addpxy</code>", emoji_ids=[CE["cross"]])
-    text = f"{PE} <b>{bs('Proxies')}</b> ({len(proxies)}/1000) {PE}\n<b>━━━━━━━━━━━━━━━━━</b>\n"
+        return await styled_reply(event, f"🕷️ <b>{bs('No proxies')}</b> <code>/addpxy</code>", emoji_ids=[CE["cross"]])
+    text = f"🕷️ <b>{bs('Proxies')}</b> ({len(proxies)}/1000) 🕷️\n<b>━━━━━━━━━━━━━━━━━</b>\n"
     eid = [CE["fire"], CE["fire"]]
     for i, p in enumerate(proxies[:30], 1):
-        text += f"<code>{i}.</code> {PE} <b>{p['ip']}:{p['port']}</b>\n"
+        text += f"<code>{i}.</code> 🖤 <b>{p['ip']}:{p['port']}</b>\n"
         eid.append(CE["link"])
     if len(proxies) > 30:
         text += f"\n<i>+{len(proxies)-30} more</i>"
-    text += f"\n{PE} <code>/rmpxy index</code>"
+    text += f"\n🕷️ <code>/rmpxy index</code>"
     eid.append(CE["trash"])
     await styled_reply(event, text, emoji_ids=eid)
 
@@ -1735,7 +1785,7 @@ async def remove_proxy_cmd(event):
     if not await force_join_check(event):
         return
     if event.is_group:
-        return await styled_reply(event, f"{PE} <b>{bs('Private only')}</b>", emoji_ids=[CE["stop"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('Private only')}</b>", emoji_ids=[CE["stop"]])
     if await is_banned_user(event.sender_id):
         t, e = banned_user_message()
         return await styled_reply(event, t, emoji_ids=e)
@@ -1743,23 +1793,23 @@ async def remove_proxy_cmd(event):
         return
     proxies = await get_all_user_proxies(event.sender_id)
     if not proxies:
-        return await styled_reply(event, f"{PE} <b>{bs('No proxies')}</b>", emoji_ids=[CE["cross"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('No proxies')}</b>", emoji_ids=[CE["cross"]])
     p = event.raw_text.split(maxsplit=1)
     if len(p) == 1:
-        return await styled_reply(event, f"{PE} <code>/rmpxy index</code> or <code>all</code>", emoji_ids=[CE["warn"]])
+        return await styled_reply(event, f"🖤 <code>/rmpxy index</code> or <code>all</code>", emoji_ids=[CE["warn"]])
     arg = p[1].strip().lower()
     if arg == 'all':
         c = await clear_all_proxies(event.sender_id)
-        return await styled_reply(event, f"{PE} <b>{bs('Cleared')} {c}</b>", emoji_ids=[CE["check"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('Cleared')} {c}</b>", emoji_ids=[CE["check"]])
     try:
         idx = int(arg) - 1
         if 0 <= idx < len(proxies):
             rm = await remove_proxy_by_index(event.sender_id, idx)
-            await styled_reply(event, f"{PE} <b>{bs('Removed')} {rm['ip']}:{rm['port']}</b>", emoji_ids=[CE["check"]])
+            await styled_reply(event, f"🕷️ <b>{bs('Removed')} {rm['ip']}:{rm['port']}</b>", emoji_ids=[CE["check"]])
         else:
-            await styled_reply(event, f"{PE} <b>{bs('Invalid index')}</b>", emoji_ids=[CE["cross"]])
+            await styled_reply(event, f"🖤 <b>{bs('Invalid index')}</b>", emoji_ids=[CE["cross"]])
     except:
-        await styled_reply(event, f"{PE} <b>{bs('Invalid')}</b>", emoji_ids=[CE["cross"]])
+        await styled_reply(event, f"🖤 <b>{bs('Invalid')}</b>", emoji_ids=[CE["cross"]])
 
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]chkpxy$'))
 async def check_proxies_cmd(event):
@@ -1768,7 +1818,7 @@ async def check_proxies_cmd(event):
     if not await force_join_check(event):
         return
     if event.is_group:
-        return await styled_reply(event, f"{PE} <b>{bs('Private only')}</b>", emoji_ids=[CE["stop"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('Private only')}</b>", emoji_ids=[CE["stop"]])
     if await is_banned_user(event.sender_id):
         t, e = banned_user_message()
         return await styled_reply(event, t, emoji_ids=e)
@@ -1776,12 +1826,12 @@ async def check_proxies_cmd(event):
         return
     proxies = await get_all_user_proxies(event.sender_id)
     if not proxies:
-        return await styled_reply(event, f"{PE} <b>{bs('No proxies')}</b>", emoji_ids=[CE["cross"]])
-    sm = await styled_reply(event, f"{PE} <b>{bs('Testing')} {len(proxies)}...</b>", emoji_ids=[CE["shield"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('No proxies')}</b>", emoji_ids=[CE["cross"]])
+    sm = await styled_reply(event, f"🕷️ <b>{bs('Testing')} {len(proxies)}...</b>", emoji_ids=[CE["shield"]])
     
     results = await test_proxies_batch(proxies)
     w = sum(1 for r in results if isinstance(r, tuple) and r[0])
-    await styled_edit(sm, f"{PE} <b>{bs('Proxy Check')}</b>\n✅ {bs('Working')}: {w}\n❌ {bs('Dead')}: {len(results)-w}", emoji_ids=[CE["shield"]])
+    await styled_edit(sm, f"🕷️ <b>{bs('Proxy Check')}</b>\n✅ {bs('Working')}: {w}\n❌ {bs('Dead')}: {len(results)-w}", emoji_ids=[CE["shield"]])
 
 # ====================== /sp (Single CC) ======================
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]sp\b'))
@@ -1797,6 +1847,18 @@ async def single_cc_check(event):
     if uid not in ADMIN_ID and not await is_user_subscribed(uid):
         return await send_no_subscription_message(event)
     await update_last_seen(uid)
+    
+    # ===== CHECK PROXIES =====
+    proxies = await get_all_user_proxies(uid)
+    if not proxies:
+        return await styled_reply(event, f"""🕷️ <b>{bs('No Proxies Found')}</b> 🕷️
+<b>━━━━━━━━━━━━━━━━━</b>
+🖤 <b>{bs('You must add proxies first')}</b>
+⚡ <i>{bs('Use /addpxy to add proxies')}</i>
+<b>━━━━━━━━━━━━━━━━━</b>
+🕷️ <code>/addpxy ip:port:user:pass</code>
+🖤 <i>{bs('Then try /sp again')}</i>""", emoji_ids=[CE["stop"], CE["stop"], CE["warn"], CE["link"], CE["info"]])
+    
     try:
         sender = await event.get_sender()
         username = sender.username or f"user_{uid}"
@@ -1805,8 +1867,7 @@ async def single_cc_check(event):
         username, name = f"user_{uid}", "User"
     sites = await get_global_sites()
     if not sites:
-        return await styled_reply(event, f"{PE} <b>{bs('No sites available. Admin please add sites.')}</b>", emoji_ids=[CE["warn"]])
-    proxies = await get_all_user_proxies(uid)
+        return await styled_reply(event, f"🕷️ <b>{bs('No sites available. Admin please add sites.')}</b>", emoji_ids=[CE["warn"]])
     rm = await event.get_reply_message() if event.reply_to_msg_id else None
     card = None
     if rm and rm.text:
@@ -1818,8 +1879,8 @@ async def single_cc_check(event):
         if cc:
             card = cc[0]
     if not card:
-        return await styled_reply(event, f"{PE} <code>/sp card|mm|yy|cvv</code>", emoji_ids=[CE["info"]])
-    lm = await styled_reply(event, f"{bs('Processing')}… ⏳")
+        return await styled_reply(event, f"🖤 <code>/sp card|mm|yy|cvv</code>", emoji_ids=[CE["info"]])
+    lm = await styled_reply(event, f"🕷️ {bs('Processing')}… ⏳")
     st = time.time()
     rotator = SmartRotator()
     try:
@@ -1837,7 +1898,7 @@ async def single_cc_check(event):
             await lm.delete()
         except:
             pass
-        HIT_BUTTON = [[Button.url(bs("Sonik"), f"https://t.me/{MAIN_BOT_USERNAME}")]]
+        HIT_BUTTON = [[Button.url(bs("Venom"), f"https://t.me/{MAIN_BOT_USERNAME}")]]
         await styled_reply(event, msg, emoji_ids=eid, buttons=HIT_BUTTON)
         if status == "Charged":
             asyncio.create_task(send_channel_hit(result, uid, username, name))
@@ -1848,7 +1909,7 @@ async def single_cc_check(event):
             await lm.delete()
         except:
             pass
-        await styled_reply(event, f"{PE} <b>{bs('Error')}:</b> <code>{e}</code>", emoji_ids=[CE["cross"]])
+        await styled_reply(event, f"🖤 <b>{bs('Error')}:</b> <code>{e}</code>", emoji_ids=[CE["cross"]])
 
 # ====================== /info ======================
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]info$'))
@@ -1874,14 +1935,14 @@ async def info_cmd(event):
     else:
         status_text = f"❌ {bs('No Subscription')}"
         se = [CE["cross"]]
-    await styled_reply(event, f"""{PE} <b>{bs('Profile')}</b> {PE}
+    await styled_reply(event, f"""🕷️ <b>{bs('Profile')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('ID')}:</b> <code>{event.sender_id}</code>
-{PE} <b>{bs('Status')}:</b> <code>{status_text}</code>
-{PE} <b>{bs('Proxies')}:</b> <code>{pc}/{bs('1000')}</code>
+🖤 <b>{bs('ID')}:</b> <code>{event.sender_id}</code>
+⚡ <b>{bs('Status')}:</b> <code>{status_text}</code>
+🕷️ <b>{bs('Proxies')}:</b> <code>{pc}/{bs('1000')}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>@{PAYMENT_BOT_USERNAME}</b> {bs('to subscribe')}
-{PE} <code>/redeem</code> {bs('to use a code')}""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["star"], CE["shield"], CE["link"]] + se)
+🖤 <b>@{PAYMENT_BOT_USERNAME}</b> {bs('to subscribe')}
+⚡ <code>/redeem</code> {bs('to use a code')}""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["star"], CE["shield"], CE["link"]] + se)
 
 # ====================== ADMIN COMMANDS ======================
 @client.on(events.NewMessage(pattern=r'(?i)^[/.](maintenance|maintance)\s+(on|off)$'))
@@ -1890,7 +1951,7 @@ async def maint_toggle(event):
         return
     a = event.raw_text.lower().split()[1]
     await set_maintenance_mode(a == "on")
-    await styled_reply(event, f"{PE} <b>{bs('Maintenance')} {bs('On') if a == 'on' else bs('Off')}</b>", emoji_ids=[CE["stop"] if a == "on" else CE["check"]])
+    await styled_reply(event, f"🕷️ <b>{bs('Maintenance')} {bs('On') if a == 'on' else bs('Off')}</b>", emoji_ids=[CE["stop"] if a == "on" else CE["check"]])
 
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]ban\b'))
 async def block_cmd(event):
@@ -1898,11 +1959,11 @@ async def block_cmd(event):
         return
     parts = event.raw_text.split()
     if len(parts) < 2:
-        return await styled_reply(event, f"{PE} <code>/ban user_id</code>", emoji_ids=[CE["warn"]])
+        return await styled_reply(event, f"🖤 <code>/ban user_id</code>", emoji_ids=[CE["warn"]])
     try:
         target_uid = int(parts[1])
     except ValueError:
-        return await styled_reply(event, f"{PE} <b>{bs('Invalid ID')}</b>", emoji_ids=[CE["cross"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('Invalid ID')}</b>", emoji_ids=[CE["cross"]])
     await ensure_user(target_uid)
     await ban_user(target_uid, event.sender_id)
     if target_uid in ACTIVE_MTXT_PROCESSES:
@@ -1912,9 +1973,9 @@ async def block_cmd(event):
             for t in proc.get("tasks", []):
                 if not t.done():
                     t.cancel()
-    await styled_reply(event, f"{PE} <b>{bs('Blocked')}</b> <code>{target_uid}</code>", emoji_ids=[CE["check"]])
+    await styled_reply(event, f"🕷️ <b>{bs('Blocked')}</b> <code>{target_uid}</code>", emoji_ids=[CE["check"]])
     try:
-        await styled_send(target_uid, f"{PE} <b>{bs('You have been blocked from using Sonik')}</b>\n{PE} <i>{bs('Contact admin if you think this is a mistake')}</i>", emoji_ids=[CE["stop"], CE["info"]])
+        await styled_send(target_uid, f"🕷️ <b>{bs('You have been blocked from using Sonik')}</b>\n🖤 <i>{bs('Contact admin if you think this is a mistake')}</i>", emoji_ids=[CE["stop"], CE["info"]])
     except:
         pass
 
@@ -1925,32 +1986,32 @@ async def unblock_cmd(event):
     
     parts = event.raw_text.split()
     if len(parts) < 2:
-        return await styled_reply(event, f"{PE} <code>/unban user_id</code>", emoji_ids=[CE["warn"]])
+        return await styled_reply(event, f"🖤 <code>/unban user_id</code>", emoji_ids=[CE["warn"]])
     
     try:
         target_uid = int(parts[1])
     except ValueError:
-        return await styled_reply(event, f"{PE} <b>{bs('Invalid ID')}</b>", emoji_ids=[CE["cross"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('Invalid ID')}</b>", emoji_ids=[CE["cross"]])
     
     await ensure_user(target_uid)
     
     is_banned = await is_banned_user(target_uid)
     if not is_banned:
-        return await styled_reply(event, f"{PE} <b>{bs('User is not banned')}</b>", emoji_ids=[CE["warn"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('User is not banned')}</b>", emoji_ids=[CE["warn"]])
     
     success = await unban_user(target_uid)
     
     if success:
-        await styled_reply(event, f"{PE} <b>{bs('Unblocked')}</b> <code>{target_uid}</code>", emoji_ids=[CE["check"]])
+        await styled_reply(event, f"🕷️ <b>{bs('Unblocked')}</b> <code>{target_uid}</code>", emoji_ids=[CE["check"]])
         try:
             await styled_send(target_uid, 
-                f"{PE} <b>{bs('You have been unblocked')}</b>\n"
-                f"{PE} <code>/start</code> {bs('to use Sonik again')}", 
+                f"🕷️ <b>{bs('You have been unblocked')}</b>\n"
+                f"🖤 <code>/start</code> {bs('to use Sonik again')}", 
                 emoji_ids=[CE["check"], CE["info"]])
         except:
             pass
     else:
-        await styled_reply(event, f"{PE} <b>{bs('Failed to unblock user')}</b>", emoji_ids=[CE["cross"]])
+        await styled_reply(event, f"🖤 <b>{bs('Failed to unblock user')}</b>", emoji_ids=[CE["cross"]])
 
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]users$'))
 async def users_cmd(event):
@@ -1958,8 +2019,8 @@ async def users_cmd(event):
         return
     users = await get_all_users()
     if not users:
-        return await styled_reply(event, f"{PE} <b>{bs('No users found')}</b>", emoji_ids=[CE["warn"]])
-    text = f"{PE} <b>{bs('Users List')}</b> ({len(users)}) {PE}\n<b>━━━━━━━━━━━━━━━━━</b>\n"
+        return await styled_reply(event, f"🕷️ <b>{bs('No users found')}</b>", emoji_ids=[CE["warn"]])
+    text = f"🕷️ <b>{bs('Users List')}</b> ({len(users)}) 🕷️\n<b>━━━━━━━━━━━━━━━━━</b>\n"
     eid = [CE["fire"], CE["fire"]]
     for i, u in enumerate(users[:30], 1):
         uid = u.get('user_id', '?')
@@ -1976,11 +2037,11 @@ async def users_cmd(event):
         elif u.get('subscription_plan') == 'unlimited':
             is_sub_active = True
         sub_status = "✅" if is_sub_active else "❌"
-        text += f"{PE} {banned} {sub_status} <code>{i}.</code> <b>{uid}</b> ━ {last_seen_str}\n"
+        text += f"🖤 {banned} {sub_status} <code>{i}.</code> <b>{uid}</b> ━ {last_seen_str}\n"
         eid.append(CE["link"])
     if len(users) > 30:
         text += f"\n<i>+{len(users)-30} more</i>"
-    text += f"\n<b>━━━━━━━━━━━━━━━━━</b>\n{PE} 🟢 Active | 🔴 Blocked | ✅ Subscribed | ❌ No Sub"
+    text += f"\n<b>━━━━━━━━━━━━━━━━━</b>\n🕷️ 🟢 Active | 🔴 Blocked | ✅ Subscribed | ❌ No Sub"
     await styled_reply(event, text, emoji_ids=eid)
 
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]broadcast\b'))
@@ -1996,7 +2057,7 @@ async def broadcast_cmd(event):
             broadcast_text = reply_msg.text
         elif reply_msg.media:
             broadcast_text = None
-            await styled_reply(event, f"{PE} <b>{bs('Broadcast Media?')}</b>\n<b>━━━━━━━━━━━━━━━━━</b>\n{PE} {bs('This will forward the media to ALL users.')}\n{PE} {bs('Are you sure?')}\n<b>━━━━━━━━━━━━━━━━━</b>\n{PE} {bs('Click confirm to proceed.')}", buttons=[[pbtn(bs("Confirm Broadcast"), f"confirm_broadcast_media:{event.sender_id}")], [pbtn(bs("Cancel"), f"cancel_broadcast")]], emoji_ids=[CE["warn"], CE["info"]])
+            await styled_reply(event, f"🕷️ <b>{bs('Broadcast Media?')}</b>\n<b>━━━━━━━━━━━━━━━━━</b>\n🖤 {bs('This will forward the media to ALL users.')}\n⚡ {bs('Are you sure?')}\n<b>━━━━━━━━━━━━━━━━━</b>\n🕷️ {bs('Click confirm to proceed.')}", buttons=[[pbtn(bs("Confirm Broadcast"), f"confirm_broadcast_media:{event.sender_id}")], [pbtn(bs("Cancel"), f"cancel_broadcast")]], emoji_ids=[CE["warn"], CE["info"]])
             async def cb(wait_event):
                 if wait_event.data.startswith(b"confirm_broadcast_media"):
                     if int(wait_event.data.split(b":")[1]) == event.sender_id:
@@ -2013,13 +2074,13 @@ async def broadcast_cmd(event):
     else:
         parts = event.raw_text.split(maxsplit=1)
         if len(parts) < 2:
-            return await styled_reply(event, f"{PE} <b>{bs('Broadcast')}</b> {PE}\n<b>━━━━━━━━━━━━━━━━━</b>\n{PE} <code>/broadcast Your message here</code>\n{PE} {bs('Or reply to a message with /broadcast')}", emoji_ids=[CE["info"]])
+            return await styled_reply(event, f"🕷️ <b>{bs('Broadcast')}</b> 🕷️\n<b>━━━━━━━━━━━━━━━━━</b>\n🖤 <code>/broadcast Your message here</code>\n⚡ {bs('Or reply to a message with /broadcast')}", emoji_ids=[CE["info"]])
         broadcast_text = parts[1]
     
     if not broadcast_text and not reply_msg:
         return
     
-    await styled_reply(event, f"{PE} <b>{bs('Broadcast Message?')}</b>\n<b>━━━━━━━━━━━━━━━━━</b>\n{PE} {bs('This will send the following to ALL users:')}\n<b>━━━━━━━━━━━━━━━━━</b>\n{broadcast_text[:300]}\n<b>━━━━━━━━━━━━━━━━━</b>\n{PE} {bs('Are you sure?')}\n<b>━━━━━━━━━━━━━━━━━</b>\n{PE} {bs('Click confirm to proceed.')}", buttons=[[pbtn(bs("Confirm Broadcast"), f"confirm_broadcast_text:{event.sender_id}")], [pbtn(bs("Cancel"), f"cancel_broadcast")]], emoji_ids=[CE["warn"], CE["info"]])
+    await styled_reply(event, f"🕷️ <b>{bs('Broadcast Message?')}</b>\n<b>━━━━━━━━━━━━━━━━━</b>\n🖤 {bs('This will send the following to ALL users:')}\n<b>━━━━━━━━━━━━━━━━━</b>\n{broadcast_text[:300]}\n<b>━━━━━━━━━━━━━━━━━</b>\n⚡ {bs('Are you sure?')}\n<b>━━━━━━━━━━━━━━━━━</b>\n🕷️ {bs('Click confirm to proceed.')}", buttons=[[pbtn(bs("Confirm Broadcast"), f"confirm_broadcast_text:{event.sender_id}")], [pbtn(bs("Cancel"), f"cancel_broadcast")]], emoji_ids=[CE["warn"], CE["info"]])
     
     async def cb(wait_event):
         if wait_event.data.startswith(b"confirm_broadcast_text"):
@@ -2037,12 +2098,12 @@ async def broadcast_cmd(event):
 async def broadcast_to_all_users(original_event, msg, media_msg):
     users = await get_all_users()
     if not users:
-        await styled_reply(original_event, f"{PE} <b>{bs('No users to broadcast to')}</b>", emoji_ids=[CE["warn"]])
+        await styled_reply(original_event, f"🕷️ <b>{bs('No users to broadcast to')}</b>", emoji_ids=[CE["warn"]])
         return
     
     success = 0
     fail = 0
-    status_msg = await styled_reply(original_event, f"{PE} <b>{bs('Broadcasting...')}</b>\n0/{len(users)}", emoji_ids=[CE["fire"]])
+    status_msg = await styled_reply(original_event, f"🕷️ <b>{bs('Broadcasting...')}</b>\n0/{len(users)}", emoji_ids=[CE["fire"]])
     
     for user in users:
         uid = user.get('user_id')
@@ -2058,11 +2119,11 @@ async def broadcast_to_all_users(original_event, msg, media_msg):
             fail += 1
         if (success + fail) % 10 == 0:
             try:
-                await styled_edit(status_msg, f"{PE} <b>{bs('Broadcasting...')}</b>\n{success+fail}/{len(users)}\n✅ {success} | ❌ {fail}", emoji_ids=[CE["fire"]])
+                await styled_edit(status_msg, f"🕷️ <b>{bs('Broadcasting...')}</b>\n{success+fail}/{len(users)}\n✅ {success} | ❌ {fail}", emoji_ids=[CE["fire"]])
             except: pass
         await asyncio.sleep(0.05)
     
-    await styled_edit(status_msg, f"{PE} <b>{bs('Broadcast Complete')}</b>\n✅ {bs('Sent')}: {success}\n❌ {bs('Failed')}: {fail}", emoji_ids=[CE["check"], CE["cross"]])
+    await styled_edit(status_msg, f"🕷️ <b>{bs('Broadcast Complete')}</b>\n✅ {bs('Sent')}: {success}\n❌ {bs('Failed')}: {fail}", emoji_ids=[CE["check"], CE["cross"]])
 
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]give\b'))
 async def give_subscription_cmd(event):
@@ -2070,30 +2131,30 @@ async def give_subscription_cmd(event):
         return
     parts = event.raw_text.split()
     if len(parts) < 3:
-        return await styled_reply(event, f"{PE} <b>{bs('Give Subscription')}</b> {PE}\n<b>━━━━━━━━━━━━━━━━━</b>\n{PE} <code>/give user_id hours</code>\n{PE} <i>{bs('Example: /give 123456789 24')}</i>\n{PE} <i>{bs('For unlimited admin access, set hours=0')}</i>", emoji_ids=[CE["info"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('Give Subscription')}</b> 🕷️\n<b>━━━━━━━━━━━━━━━━━</b>\n🖤 <code>/give user_id hours</code>\n⚡ <i>{bs('Example: /give 123456789 24')}</i>\n🕷️ <i>{bs('For unlimited admin access, set hours=0')}</i>", emoji_ids=[CE["info"]])
     try:
         target_uid = int(parts[1])
         hours = int(parts[2])
         await ensure_user(target_uid)
         if hours > 0:
             await set_user_subscription(target_uid, "admin_gift", hours)
-            await styled_reply(event, f"{PE} <b>{bs('Subscription Given')}</b> {PE}\n<b>━━━━━━━━━━━━━━━━━</b>\n{PE} <b>{bs('User')}:</b> <code>{target_uid}</code>\n{PE} <b>{bs('Duration')}:</b> <code>{hours} hours</code>", emoji_ids=[CE["check"], CE["check"], CE["star"], CE["gem"]])
+            await styled_reply(event, f"🕷️ <b>{bs('Subscription Given')}</b> 🕷️\n<b>━━━━━━━━━━━━━━━━━</b>\n🖤 <b>{bs('User')}:</b> <code>{target_uid}</code>\n⚡ <b>{bs('Duration')}:</b> <code>{hours} hours</code>", emoji_ids=[CE["check"], CE["check"], CE["star"], CE["gem"]])
             try:
-                await styled_send(target_uid, f"{PE} <b>{bs('Admin Gave You a Subscription!')}</b> {PE}\n<b>━━━━━━━━━━━━━━━━━</b>\n{PE} <b>{bs('Duration')}:</b> <code>{hours} hours</code>\n<b>━━━━━━━━━━━━━━━━━</b>\n{PE} <code>/start</code> {bs('to use Sonik')}", emoji_ids=[CE["gift"], CE["gift"], CE["star"], CE["info"]])
+                await styled_send(target_uid, f"🕷️ <b>{bs('Admin Gave You a Subscription!')}</b> 🕷️\n<b>━━━━━━━━━━━━━━━━━</b>\n🖤 <b>{bs('Duration')}:</b> <code>{hours} hours</code>\n<b>━━━━━━━━━━━━━━━━━</b>\n⚡ <code>/start</code> {bs('to use Sonik')}", emoji_ids=[CE["gift"], CE["gift"], CE["star"], CE["info"]])
             except:
                 pass
         else:
             await db["users"].update_one({"user_id": target_uid}, {"$set": {"subscription_plan": "unlimited", "subscription_end": None}})
-            await styled_reply(event, f"{PE} <b>{bs('Unlimited Access Given')}</b> {PE}\n<b>━━━━━━━━━━━━━━━━━</b>\n{PE} <b>{bs('User')}:</b> <code>{target_uid}</code>", emoji_ids=[CE["crown"], CE["crown"], CE["check"]])
+            await styled_reply(event, f"👑 <b>{bs('Unlimited Access Given')}</b> 👑\n<b>━━━━━━━━━━━━━━━━━</b>\n🖤 <b>{bs('User')}:</b> <code>{target_uid}</code>", emoji_ids=[CE["crown"], CE["crown"], CE["check"]])
     except Exception as e:
-        await styled_reply(event, f"{PE} <b>{bs('Error')}:</b> <code>{e}</code>", emoji_ids=[CE["cross"]])
+        await styled_reply(event, f"🖤 <b>{bs('Error')}:</b> <code>{e}</code>", emoji_ids=[CE["cross"]])
 
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]resetsites$'))
 async def reset_sites_cmd(event):
     if event.sender_id not in ADMIN_ID:
         return
     await clear_all_global_sites()
-    await styled_reply(event, f"{PE} <b>{bs('All sites have been cleared')}</b>\n{PE} <i>{bs('Use /add to add new sites')}</i>", emoji_ids=[CE["check"], CE["info"]])
+    await styled_reply(event, f"🕷️ <b>{bs('All sites have been cleared')}</b>\n🖤 <i>{bs('Use /add to add new sites')}</i>", emoji_ids=[CE["check"], CE["info"]])
 
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]stats$'))
 async def stats_cmd(event):
@@ -2110,20 +2171,20 @@ async def stats_cmd(event):
         total_codes = await db["codes"].count_documents({})
         used_codes = await db["codes"].count_documents({"used": True})
         
-        await styled_reply(event, f"""{PE} <b>{bs('Sonik Statistics')}</b> {PE}
+        await styled_reply(event, f"""🕷️ <b>{bs('Venom Statistics')}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('Users')}:</b> <code>{tu}</code>
-{PE} <b>{bs('Subscribed')}:</b> <code>{pu}</code>
-{PE} <b>{bs('Cards Checked')}:</b> <code>{tc}</code>
-{PE} <b>{bs('Charged')}:</b> <code>{ch}</code>
-{PE} <b>{bs('Approved')}:</b> <code>{ap}</code>
-{PE} <b>{bs('Sites')}:</b> <code>{sites_count}</code>
-{PE} <b>{bs('Codes Generated')}:</b> <code>{total_codes}</code>
-{PE} <b>{bs('Codes Used')}:</b> <code>{used_codes}</code>
+🖤 <b>{bs('Users')}:</b> <code>{tu}</code>
+⚡ <b>{bs('Subscribed')}:</b> <code>{pu}</code>
+🕷️ <b>{bs('Cards Checked')}:</b> <code>{tc}</code>
+🖤 <b>{bs('Charged')}:</b> <code>{ch}</code>
+⚡ <b>{bs('Approved')}:</b> <code>{ap}</code>
+🕷️ <b>{bs('Sites')}:</b> <code>{sites_count}</code>
+🖤 <b>{bs('Codes Generated')}:</b> <code>{total_codes}</code>
+⚡ <b>{bs('Codes Used')}:</b> <code>{used_codes}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('MSP Active')}:</b> <code>{len(ACTIVE_MTXT_PROCESSES)}</code> ({MSP_PER_USER_WORKERS}w)""", emoji_ids=[CE["fire"], CE["fire"], CE["chart"], CE["link"], CE["gem"], CE["star"], CE["brain"], CE["shield"]])
+🕷️ <b>{bs('MSP Active')}:</b> <code>{len(ACTIVE_MTXT_PROCESSES)}</code> ({MSP_PER_USER_WORKERS}w)""", emoji_ids=[CE["fire"], CE["fire"], CE["chart"], CE["link"], CE["gem"], CE["star"], CE["brain"], CE["shield"]])
     except Exception as e:
-        await styled_reply(event, f"{PE} <b>{bs('Error')}:</b> <code>{e}</code>", emoji_ids=[CE["cross"]])
+        await styled_reply(event, f"🖤 <b>{bs('Error')}:</b> <code>{e}</code>", emoji_ids=[CE["cross"]])
 
 # ====================== /stop ======================
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]stop$'))
@@ -2135,9 +2196,9 @@ async def stop_cmd(event):
         for task in proc.get("tasks", []):
             if not task.done():
                 task.cancel()
-        await styled_reply(event, f"{PE} <b>{bs('Stopping process...')}</b>", emoji_ids=[CE["stop"]])
+        await styled_reply(event, f"🕷️ <b>{bs('Stopping process...')}</b>", emoji_ids=[CE["stop"]])
     else:
-        await styled_reply(event, f"{PE} <b>{bs('No active process')}</b>", emoji_ids=[CE["warn"]])
+        await styled_reply(event, f"🖤 <b>{bs('No active process')}</b>", emoji_ids=[CE["warn"]])
 
 # ====================== MASS CHECK ======================
 @client.on(events.NewMessage(pattern=r'(?i)^[/.]msp\b'))
@@ -2156,10 +2217,22 @@ async def mass_check_cmd(event):
     if uid in ACTIVE_MTXT_PROCESSES:
         proc = ACTIVE_MTXT_PROCESSES.get(uid)
         if proc and not proc.get("stopped", True):
-            return await styled_reply(event, f"{PE} <b>{bs('You already have an active process')}</b>\n{PE} {bs('Use /stop to cancel it first')}", emoji_ids=[CE["warn"]])
+            return await styled_reply(event, f"🕷️ <b>{bs('You already have an active process')}</b>\n🖤 {bs('Use /stop to cancel it first')}", emoji_ids=[CE["warn"]])
     sites = await get_global_sites()
     if not sites:
-        return await styled_reply(event, f"{PE} <b>{bs('No sites available. Admin please add sites.')}</b>", emoji_ids=[CE["warn"]])
+        return await styled_reply(event, f"🕷️ <b>{bs('No sites available. Admin please add sites.')}</b>", emoji_ids=[CE["warn"]])
+    
+    # ===== CHECK PROXIES =====
+    proxies = await get_all_user_proxies(uid)
+    if not proxies:
+        return await styled_reply(event, f"""🕷️ <b>{bs('No Proxies Found')}</b> 🕷️
+<b>━━━━━━━━━━━━━━━━━</b>
+🖤 <b>{bs('You must add proxies first')}</b>
+⚡ <i>{bs('Use /addpxy to add proxies')}</i>
+<b>━━━━━━━━━━━━━━━━━</b>
+🕷️ <code>/addpxy ip:port:user:pass</code>
+🖤 <i>{bs('Then try /msp again')}</i>""", emoji_ids=[CE["stop"], CE["stop"], CE["warn"], CE["link"], CE["info"]])
+    
     content = ""
     cmd_text = re.sub(r'^[/.]msp\s*', '', event.raw_text, flags=re.IGNORECASE).strip()
     if cmd_text:
@@ -2168,7 +2241,7 @@ async def mass_check_cmd(event):
     elif event.reply_to_msg_id:
         rm = await event.get_reply_message()
         if not rm:
-            return await styled_reply(event, f"{PE} <b>{bs('Message not found')}</b>", emoji_ids=[CE["warn"]])
+            return await styled_reply(event, f"🕷️ <b>{bs('Message not found')}</b>", emoji_ids=[CE["warn"]])
         if rm.document:
             fp = await rm.download_media()
             try:
@@ -2185,22 +2258,22 @@ async def mass_check_cmd(event):
     cards = extract_cc(content)
     if not cards:
         if from_inline:
-            return await styled_reply(event, f"{PE} <b>{bs('No valid cards')}</b>", emoji_ids=[CE["cross"]])
+            return await styled_reply(event, f"🕷️ <b>{bs('No valid cards')}</b>", emoji_ids=[CE["cross"]])
         else:
-            return await styled_reply(event, f"{PE} <b>{bs('Reply to .txt or paste cards after')} </b><code>/msp</code>", emoji_ids=[CE["info"]])
+            return await styled_reply(event, f"🖤 <b>{bs('Reply to .txt or paste cards after')} </b><code>/msp</code>", emoji_ids=[CE["info"]])
     if uid not in ADMIN_ID and len(cards) > MAX_CARDS_MASS:
         cards = cards[:MAX_CARDS_MASS]
-        await styled_reply(event, f"{PE} <b>{bs('Limited to')} {MAX_CARDS_MASS} {bs('cards for non-admin users')}</b>", emoji_ids=[CE["warn"]])
+        await styled_reply(event, f"🕷️ <b>{bs('Limited to')} {MAX_CARDS_MASS} {bs('cards for non-admin users')}</b>", emoji_ids=[CE["warn"]])
     elif len(cards) > 10000 and uid in ADMIN_ID:
         cards = cards[:10000]
-        await styled_reply(event, f"{PE} <b>{bs('Limited to 10000 cards per check')}</b>", emoji_ids=[CE["warn"]])
+        await styled_reply(event, f"🕷️ <b>{bs('Limited to 10000 cards per check')}</b>", emoji_ids=[CE["warn"]])
     kb = [
         [pbtn("🔥 Charged Only", f"mass_filter:charged:{uid}")],
         [pbtn("✅ Approved Only", f"mass_filter:approved:{uid}")],
         [pbtn("⭐ Charged + Approved", f"mass_filter:both:{uid}")]
     ]
-    pm = await styled_reply(event, f"{PE} <b>{bs('Choose what to send in chat')}</b>\n<b>━━━━━━━━━━━━━━━━━</b>\n{PE} <i>{bs('Select which results you want to receive')}</i>\n{PE} <code>{len(cards)}</code> {bs('cards loaded')}", buttons=kb, emoji_ids=[CE["chart"], CE["fire"]])
-    USER_APPROVED_PREF[f"mass_{uid}"] = {"cards": cards, "sites": sites, "proxies": await get_all_user_proxies(uid), "event": event, "pref_msg": pm, "rotator": SmartRotator()}
+    pm = await styled_reply(event, f"🕷️ <b>{bs('Choose what to send in chat')}</b>\n<b>━━━━━━━━━━━━━━━━━</b>\n🖤 <i>{bs('Select which results you want to receive')}</i>\n⚡ <code>{len(cards)}</code> {bs('cards loaded')}", buttons=kb, emoji_ids=[CE["chart"], CE["fire"]])
+    USER_APPROVED_PREF[f"mass_{uid}"] = {"cards": cards, "sites": sites, "proxies": proxies, "event": event, "pref_msg": pm, "rotator": SmartRotator()}
 
 @client.on(events.CallbackQuery(pattern=rb"mass_filter:(charged|approved|both):(\d+)"))
 async def mass_filter_cb(event):
@@ -2249,7 +2322,7 @@ async def _run_mass_process(event, cards, proxies, send_approved, process_store,
     user_check = await db["users"].find_one({"user_id": uid})
     if user_check and user_check.get("banned", False):
         process_store[uid] = {"stopped": True}
-        await styled_reply(event, f"{PE} <b>{bs('You are banned. Process stopped.')}</b>", emoji_ids=[CE["stop"]])
+        await styled_reply(event, f"🕷️ <b>{bs('You are banned. Process stopped.')}</b>", emoji_ids=[CE["stop"]])
         return
     
     try:
@@ -2266,7 +2339,7 @@ async def _run_mass_process(event, cards, proxies, send_approved, process_store,
     workers = MSP_PER_USER_WORKERS
     user_sem = get_user_sem(uid, sem_type)
     http_session = await get_user_http_session(uid, sem_type)
-    sm = await styled_reply(event, f"<pre>{PE} {bs('Processing')} ━ {gate_name} ━ {workers}{bs('w')}</pre>", emoji_ids=[CE["chart"]])
+    sm = await styled_reply(event, f"🕷️ {bs('Processing')} ━ {gate_name} ━ {workers}{bs('w')}", emoji_ids=[CE["chart"]])
     last_ui = [0]
     lcd, lrd = "-", "-"
     
@@ -2302,7 +2375,7 @@ async def _run_mass_process(event, cards, proxies, send_approved, process_store,
             [pbtn(bs("Stop"), f"{stop_prefix}:{uid}")]
         ]
         try:
-            await styled_edit(sm, f"<pre>{PE} {bs('Processing')}...</pre>", buttons=kb, emoji_ids=[CE["star"]])
+            await styled_edit(sm, f"🕷️ {bs('Processing')}...", buttons=kb, emoji_ids=[CE["star"]])
         except:
             pass
     
@@ -2367,14 +2440,14 @@ async def _run_mass_process(event, cards, proxies, send_approved, process_store,
     h, m, s = el // 3600, (el % 3600) // 60, el % 60
     stop_label = f" ({bs('Stopped')})" if is_stopped() else ""
     
-    ft = f"""{PE} <b>{bs('Complete')}{stop_label}</b> {PE}
+    ft = f"""🕷️ <b>{bs('Complete')}{stop_label}</b> 🕷️
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('Charged')}</b> ━ <code>{charged}</code>
-{PE} <b>{bs('Approved')}</b> ━ <code>{approved}</code>
-{PE} <b>{bs('Declined')}</b> ━ <code>{declined}</code>
-{PE} <b>{bs('Errors')}</b> ━ <code>{errors}</code>
+🖤 <b>{bs('Charged')}</b> ━ <code>{charged}</code>
+⚡ <b>{bs('Approved')}</b> ━ <code>{approved}</code>
+🕷️ <b>{bs('Declined')}</b> ━ <code>{declined}</code>
+🖤 <b>{bs('Errors')}</b> ━ <code>{errors}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <b>{bs('Checked')}</b> ━ <code>{checked}/{total}</code>"""
+⚡ <b>{bs('Checked')}</b> ━ <code>{checked}/{total}</code>"""
     
     fkb = [
         [pbtn(f"{bs('C')} ━ {charged}", "none"), pbtn(f"{bs('A')} ━ {approved}", "none")],
@@ -2401,7 +2474,7 @@ async def _send_mass_hit(card, result, status, uid, username, name):
         resp = result.get('Response', '')[:150]
         msg, eid = format_card_result(status, card, gw, resp, result.get('Price', '-'), result.get('site', '-'), bi, 0.0)
         try:
-            HIT_BUTTON = [[Button.url(bs("Sonik"), f"https://t.me/{MAIN_BOT_USERNAME}")]]
+            HIT_BUTTON = [[Button.url(bs("Venom"), f"https://t.me/{MAIN_BOT_USERNAME}")]]
             await styled_send(uid, msg, emoji_ids=eid, buttons=HIT_BUTTON)
         except:
             pass
@@ -2412,17 +2485,17 @@ async def _send_mass_hit(card, result, status, uid, username, name):
 
 async def send_final_file(uid, charged, approved, declined, errors, total, hits=None, target_chat=None):
     hits = hits or []
-    fn = f"sonik_{uid}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    fn = f"venom_{uid}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
     target = target_chat or uid
     try:
         async with aiofiles.open(fn, 'w', encoding='utf-8') as f:
-            await f.write(f"{'='*49}\nSONIK RESULTS\n{'='*49}\n\nCharged: {charged}\nApproved: {approved}\nDeclined: {declined}\nErrors: {errors}\nTotal: {total}\n")
+            await f.write(f"{'='*49}\nVENOM RESULTS\n{'='*49}\n\nCharged: {charged}\nApproved: {approved}\nDeclined: {declined}\nErrors: {errors}\nTotal: {total}\n")
             if hits:
                 await f.write(f"\n{'='*49}\nHITS\n{'='*49}\n\n")
                 for h in hits:
                     await f.write(h + "\n")
         try:
-            await styled_send(target, f"{PE} <b>{bs('Results')}</b> {PE}", emoji_ids=[CE["fire"], CE["fire"]], file=fn)
+            await styled_send(target, f"🕷️ <b>{bs('Results')}</b> 🕷️", emoji_ids=[CE["fire"], CE["fire"]], file=fn)
         except:
             pass
         try:
@@ -2485,13 +2558,15 @@ async def main():
             me = await client.get_me()
             MAIN_BOT_USERNAME = me.username
             client_instance = client
-            log_system("BOOT", f"✅ Sonik Bot (@{MAIN_BOT_USERNAME}) started!")
+            log_system("BOOT", f"✅ Venom Bot (@{MAIN_BOT_USERNAME}) started!")
             log_system("BOOT", "✅ Enhanced features: All gateways except Authorize.Net and Checkout.com accepted")
             log_system("BOOT", "✅ Price filtering from 0.50 USD")
             log_system("BOOT", "✅ 3ds_required classified as Approved")
             log_system("BOOT", "✅ Code system enabled: /code and /redeem")
             log_system("BOOT", "✅ Dead responses rejected in /add and /site")
             log_system("BOOT", "✅ High load support: 300+ users")
+            log_system("BOOT", "✅ Proxy required for /sp and /msp")
+            log_system("BOOT", "✅ Interactive buttons enabled")
             await client.run_until_disconnected()
         except FloodWaitError as e:
             log_system("FLOOD", f"Sleeping {e.seconds+5}s", "warning")
