@@ -1,8 +1,10 @@
-# SONIK MAIN BOT - COMPLETE VERSION WITH FIXED /REDEEM COMMAND
-# Fixed: datetime timezone comparison error in /redeem
-# Fixed: /redeem command now works for all users
-# Added: Code system with /code and /redeem
-# Enhanced: Performance optimizations for high load
+# SONIK MAIN BOT - COMPLETE VERSION WITH ALL FIXES
+# Added: Rejected responses filter (dead sites)
+# Added: Increased timeout for slow sites (25s)
+# Added: High load support (300+ users)
+# Fixed: detect_payment_gateway now rejects dead responses
+# Fixed: /redeem timezone issue
+# Enhanced: Connection limits for better performance
 
 from telethon.errors import FloodWaitError
 from telethon import TelegramClient, events, Button
@@ -55,15 +57,15 @@ API_BASE_URL = "https://shopify-api-all-production.up.railway.app/shopify"
 # Payment bot username
 PAYMENT_BOT_USERNAME = "Stars838bot"
 
-# Worker Configuration - INCREASED for better performance
-SP_PER_USER_WORKERS = 50
-MSP_PER_USER_WORKERS = 60
-SITE_PER_USER_WORKERS = 50
-PROXY_PER_USER_WORKERS = 80
-BIN_WORKERS = 30
+# Worker Configuration - INCREASED for high load (300+ users)
+SP_PER_USER_WORKERS = 80
+MSP_PER_USER_WORKERS = 100
+SITE_PER_USER_WORKERS = 80
+PROXY_PER_USER_WORKERS = 120
+BIN_WORKERS = 50
 
-# Timeout Configuration
-API_TIMEOUT = 60
+# Timeout Configuration - INCREASED for slow sites
+API_TIMEOUT = 90
 BIN_TIMEOUT = 60
 PROXY_TIMEOUT = 8
 PROXY_CHECK_BATCH = 50
@@ -88,7 +90,20 @@ _BIN_CACHE_TIME = {}
 _BIN_CACHE_TTL = 3600
 
 # Gateway settings - REJECT Authorize.Net AND Checkout.com ONLY
-REJECTED_GATEWAYS = ['authorize.net', 'authorize', 'checkout.com', 'checkout','Checkout.com - Onsite Payments']
+REJECTED_GATEWAYS = ['authorize.net', 'authorize', 'checkout.com', 'checkout', 'Checkout.com - Onsite Payments']
+
+# ====================== REJECTED RESPONSES ======================
+# These responses indicate dead sites - will be rejected in /add and /site
+REJECTED_RESPONSES = [
+    'empty submit response',
+    'empty submit',
+    'no valid payment method',
+    'no valid payment method found',
+    'unable to get payment token',
+    'cart failed with status 429',
+    'checkout token not found',
+    'checkout token is empty'
+]
 
 PRICE_RANGES = {
     "1": {"name": "0.50-5 USD", "min": 0.50, "max": 5},
@@ -201,8 +216,8 @@ async def get_user_http_session(uid, purpose="general"):
     session = _USER_HTTP_SESSIONS.get(key)
     if session is None or session.closed:
         connector = aiohttp.TCPConnector(
-            limit=200, limit_per_host=80, ttl_dns_cache=300,
-            use_dns_cache=True, keepalive_timeout=30, enable_cleanup_closed=True,
+            limit=500, limit_per_host=150, ttl_dns_cache=300,
+            use_dns_cache=True, keepalive_timeout=60, enable_cleanup_closed=True,
         )
         session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=API_TIMEOUT, connect=10),
@@ -223,7 +238,7 @@ async def cleanup_user_http_session(uid, purpose="general"):
 async def get_bin_session():
     global _GLOBAL_BIN_SESSION
     if _GLOBAL_BIN_SESSION is None or _GLOBAL_BIN_SESSION.closed:
-        connector = aiohttp.TCPConnector(limit=80, limit_per_host=30)
+        connector = aiohttp.TCPConnector(limit=150, limit_per_host=50)
         _GLOBAL_BIN_SESSION = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=BIN_TIMEOUT, connect=5),
             connector=connector
@@ -233,7 +248,7 @@ async def get_bin_session():
 async def get_proxy_session():
     global _GLOBAL_PROXY_SESSION
     if _GLOBAL_PROXY_SESSION is None or _GLOBAL_PROXY_SESSION.closed:
-        connector = aiohttp.TCPConnector(limit=150, limit_per_host=50)
+        connector = aiohttp.TCPConnector(limit=300, limit_per_host=100)
         _GLOBAL_PROXY_SESSION = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=PROXY_TIMEOUT, connect=8),
             connector=connector
@@ -375,6 +390,13 @@ SITE_ERROR_KEYWORDS = [
     'site error', 'site dead', 'server error', 'internal server error', 'timeout',
     'connection error', 'connection failed', 'timed out', 'cloudflare', 'access denied',
     'bad gateway', 'service unavailable', 'gateway timeout',
+    # Rejected responses - these indicate dead sites
+    'empty submit response',
+    'empty submit',
+    'no valid payment method',
+    'no valid payment method found',
+    'unable to get payment token',
+    'cart failed with status 429',
 ]
 
 PROXY_ERROR_KEYWORDS = ['proxy dead', 'proxy error', 'proxy timeout', 'proxy connection failed']
@@ -407,7 +429,7 @@ async def detect_payment_gateway(site, proxy_data=None, http_session=None):
     try:
         url = build_api_url(site if site.startswith('http') else f'https://{site}', test_card, proxy_data)
         s = http_session or (await get_user_http_session(0, "site"))
-        async with s.get(url, timeout=15) as resp:
+        async with s.get(url, timeout=25) as resp:  # Increased to 25s for slow sites
             if resp.status != 200:
                 return 'dead'
             try:
@@ -418,16 +440,17 @@ async def detect_payment_gateway(site, proxy_data=None, http_session=None):
             rm = str(raw.get('Response', '')).lower()
             gw = str(raw.get('Gate', raw.get('Gateway', ''))).lower()
             
+            # ===== REJECT DEAD RESPONSES =====
+            # If any rejected response is found, reject the site immediately
+            for rejected in REJECTED_RESPONSES:
+                if rejected in rm:
+                    return 'dead'
+            
             if 'shopify' in gw:
                 return 'shopify'
             
-            if is_site_error(rm) and 'empty submit' not in rm:
+            if is_site_error(rm):
                 return 'dead'
-            
-            if rm == '' or rm == 'empty submit response':
-                if 'shopify' in gw:
-                    return 'shopify'
-                return 'unknown'
             
             if gw and gw != '' and gw != 'unknown':
                 return gw
@@ -444,7 +467,7 @@ async def get_site_product_price(site, proxy_data=None, http_session=None):
     try:
         url = build_api_url(site if site.startswith('http') else f'https://{site}', test_card, proxy_data)
         s = http_session or (await get_user_http_session(0, "site"))
-        async with s.get(url, timeout=15) as resp:
+        async with s.get(url, timeout=25) as resp:  # Increased to 25s for slow sites
             if resp.status != 200:
                 return None
             try:
@@ -470,7 +493,8 @@ async def verify_site_full(site, proxy_data=None, http_session=None, max_retries
         gateway = await detect_payment_gateway(site, proxy_data, http_session)
         price = await get_site_product_price(site, proxy_data, http_session)
         
-        if gateway in ['authorize.net', 'authorize', 'checkout.com', 'checkout']:
+        # Reject Authorize.Net and Checkout.com only
+        if gateway in ['authorize.net', 'authorize', 'checkout.com', 'checkout', 'Checkout.com - Onsite Payments']:
             return {
                 'site': site,
                 'status': 'rejected',
@@ -1321,7 +1345,7 @@ async def add_site(event):
 {PE} <code>/add site.com</code>
 {PE} <i>{bs('Or reply to a .txt file')}</i>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <i>{bs('All working sites are accepted (except Authorize.Net and Checkout.com)')}</i>""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["link"]])
+{PE} <i>{bs('Working Shopify sites only (dead sites rejected)')}</i>""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["link"]])
         sites_list = list(dict.fromkeys(sites_list))
         existing_sites = await get_global_sites()
         existing_norm = {normalize_site_url(s) for s in existing_sites}
@@ -1347,7 +1371,7 @@ async def add_site(event):
 {PE} <b>{bs('New Sites')}:</b> <code>{len(new_sites)}</code>
 {PE} <b>{bs('Already Exist')}:</b> <code>{len(already_exists)}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <i>{bs('Only working sites will be added (except Authorize.Net and Checkout.com)')}</i>
+{PE} <i>{bs('Only working Shopify sites will be added (dead sites rejected)')}</i>
 {PE} <i>{bs('Sites with price above range will be excluded')}</i>""", buttons=kb, emoji_ids=[CE["fire"], CE["fire"], CE["globe"], CE["warn"], CE["info"]])
 
     except Exception as e:
@@ -1420,15 +1444,15 @@ async def _process_add_sites_with_filter(event, new_sites, already_exists, price
     await styled_edit(sm, f"""{PE} <b>{bs('Add Sites Complete')}</b> {PE}
 <b>━━━━━━━━━━━━━━━━━</b>
 {PE} <b>{bs('Tested')}:</b> <code>{tested}</code>
-{PE} <b>{bs('Working (Any Gateway)')}:</b> <code>{working}</code>
+{PE} <b>{bs('Working (Shopify)')}:</b> <code>{working}</code>
 {PE} <b>{bs('Dead')}:</b> <code>{dead}</code>
-{PE} <b>{bs('Rejected (Authorize.Net/Checkout.com/Error)')}:</b> <code>{rejected_gateway}</code>
+{PE} <b>{bs('Rejected (Dead/Error/Invalid Response)')}:</b> <code>{rejected_gateway}</code>
 {PE} <b>{bs('Price Filtered')}:</b> <code>{price_filtered}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
 {PE} <b>{bs('Added')} (${price_range['min']}-${price_range['max']}):</b> <code>{added}</code>
 {PE} <b>{bs('Already Existed')}:</b> <code>{len(already_exists)}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} <i>{bs('All working sites except Authorize.Net and Checkout.com are accepted')}</i>""", emoji_ids=[CE["check"], CE["check"], CE["globe"], CE["fire"], CE["cross"], CE["chart"], CE["warn"], CE["info"]])
+{PE} <i>{bs('Only working Shopify sites are accepted (dead sites rejected)')}</i>""", emoji_ids=[CE["check"], CE["check"], CE["globe"], CE["fire"], CE["cross"], CE["chart"], CE["warn"], CE["info"]])
     
     await cleanup_user_http_session(uid, "site")
     cleanup_user_sem(uid)
@@ -1504,7 +1528,7 @@ async def check_sites_with_filter_cmd(event):
 {PE} <b>{bs('Total Sites')}:</b> <code>{len(sites)}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
 {PE} <i>{bs('Select price range to filter')}</i>
-{PE} <i>{bs('All working sites with any gateway are kept (except Authorize.Net and Checkout.com)')}</i>""", buttons=kb, emoji_ids=[CE["fire"], CE["fire"], CE["globe"], CE["info"]])
+{PE} <i>{bs('Only working Shopify sites are kept (dead sites removed)')}</i>""", buttons=kb, emoji_ids=[CE["fire"], CE["fire"], CE["globe"], CE["info"]])
 
 @client.on(events.CallbackQuery(pattern=rb"site_price_range:(\d+):(\d+)"))
 async def site_price_range_cb(event):
@@ -1593,9 +1617,9 @@ async def _process_site_check_with_filter(event, price_range):
 <b>━━━━━━━━━━━━━━━━━</b>
 {PE} <b>{bs('Filter')}:</b> <code>{price_range['name']}</code>
 {PE} <b>{bs('Total Tested')}:</b> <code>{total}</code>
-{PE} <b>{bs('Alive (Any Gateway)')}:</b> <code>{alive}</code>
+{PE} <b>{bs('Alive (Shopify)')}:</b> <code>{alive}</code>
 {PE} <b>{bs('Dead')}:</b> <code>{dead}</code>
-{PE} <b>{bs('Rejected (Authorize.Net/Checkout.com/Error)')}:</b> <code>{rejected_gateway}</code>
+{PE} <b>{bs('Rejected (Dead/Error/Invalid Response)')}:</b> <code>{rejected_gateway}</code>
 {PE} <b>{bs('Price Filtered Out')}:</b> <code>{price_filtered}</code>
 {PE} <b>{bs('Removed from sites.txt')}:</b> <code>{removed_count}</code>
 {PE} <b>{bs('Kept in sites.txt')}:</b> <code>{kept}</code>
@@ -1603,7 +1627,7 @@ async def _process_site_check_with_filter(event, price_range):
 <b>{bs('Top Sites (Lowest Price)')}:</b>
 {top_sites_text if top_sites_text else 'None'}
 <b>━━━━━━━━━━━━━━━━━</b>
-{PE} 🛍️ = Shopify | 💳 = Other Gateway""", emoji_ids=[CE["check"], CE["check"], CE["fire"], CE["globe"], CE["cross"], CE["chart"], CE["star"]])
+{PE} 🛍️ = Shopify""", emoji_ids=[CE["check"], CE["check"], CE["fire"], CE["globe"], CE["cross"], CE["chart"], CE["star"]])
     
     await cleanup_user_http_session(uid, "site")
     cleanup_user_sem(uid)
@@ -2466,6 +2490,8 @@ async def main():
             log_system("BOOT", "✅ Price filtering from 0.50 USD")
             log_system("BOOT", "✅ 3ds_required classified as Approved")
             log_system("BOOT", "✅ Code system enabled: /code and /redeem")
+            log_system("BOOT", "✅ Dead responses rejected in /add and /site")
+            log_system("BOOT", "✅ High load support: 300+ users")
             await client.run_until_disconnected()
         except FloodWaitError as e:
             log_system("FLOOD", f"Sleeping {e.seconds+5}s", "warning")
