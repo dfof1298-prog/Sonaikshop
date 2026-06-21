@@ -181,8 +181,22 @@ CE = {
     "link": 5042101437237036298, "globe": 5042186567783809934,
     "restart": 5413554170668032766, "online": 5413813953685923984,
     "declined": 4956612582816351459,
+    "fire_premium": 5039644681583985437,
+    "heart_fire": 5039968412613214223,
+    "cool": 5042202682316554526,
+    "sled": 5041857106060247653,
+    "wine": 5039778134807806727,
+    "diamond": 5042050649248760772,
+    "snowman": 5041926210087545422
 }
 PE = "⭐"
+
+def gemj(emoji_name):
+    """Return HTML for Custom Emoji (Premium)"""
+    emoji_id = CE.get(emoji_name)
+    if emoji_id:
+        return f'<tg-emoji emoji-id="{emoji_id}">{emoji_name}</tg-emoji>'
+    return ""
 
 # ====================== ACTIVE PROCESSES ======================
 ACTIVE_MTXT_PROCESSES = {}
@@ -1107,7 +1121,7 @@ async def start(event):
         credits = "Unlimited" if uid in ADMIN_ID else "250"
         joined_date = user.get("created_at", datetime.now()).strftime("%Y-%m-%d") if user else datetime.now().strftime("%Y-%m-%d")
         
-        text = f"""⚡️❤️‍🔥🆒🛷🥂💎💎☃️
+        text = f"""{gemj('fire_premium')}{gemj('heart_fire')}{gemj('cool')}{gemj('sled')}{gemj('wine')}{gemj('diamond')}{gemj('diamond')}{gemj('snowman')}
 
 👤 <b>{bs('User')}:</b> <i>{user_name}</i> 🃏
 🆔 <b>{bs('User ID')}:</b> <code>{uid}</code>
@@ -1119,22 +1133,22 @@ async def start(event):
 
         kb = [
             [
-                Button.inline("⚡️ CHECKER MENU", data="menu_checker", style="success"), 
-                Button.inline("💎 SITES CONTROL", data="menu_sites", style="success")
+                Button.inline(f"{gemj('fire_premium')} {bs('CHECKER MENU')}", data="menu_checker", style="success"), 
+                Button.inline(f"{gemj('diamond')} {bs('SITES CONTROL')}", data="menu_sites", style="success")
             ],
             [
-                Button.inline("🛷 PROXY CONTROL", data="menu_proxy", style="danger"), 
-                Button.inline("🆒 MY ACCOUNT", data="menu_account", style="danger")
+                Button.inline(f"{gemj('sled')} {bs('PROXY CONTROL')}", data="menu_proxy", style="danger"), 
+                Button.inline(f"{gemj('cool')} {bs('MY ACCOUNT')}", data="menu_account", style="danger")
             ],
             [
-                Button.inline("☃️ ADMIN PANEL", data="menu_admin", style="primary")
+                Button.inline(f"{gemj('snowman')} {bs('ADMIN PANEL')}", data="menu_admin", style="primary")
             ],
             [
-                Button.url("🥂 UPGRADE TO PREMIUM", url=f"https://t.me/{PAYMENT_BOT_USERNAME}", style="success")
+                Button.url(f"{gemj('wine')} {bs('UPGRADE TO PREMIUM')}", url=f"https://t.me/{PAYMENT_BOT_USERNAME}", style="success")
             ],
             [
-                Button.url("❤️‍🔥 OFFICIAL CHANNEL", url="https://t.me/ReGict7", style="primary"), 
-                Button.url("🆒 SUPPORT", url="https://t.me/ISoonik", style="primary")
+                Button.url(f"{gemj('heart_fire')} {bs('OFFICIAL CHANNEL')}", url="https://t.me/ReGict7", style="primary"), 
+                Button.url(f"{gemj('cool')} {bs('SUPPORT')}", url="https://t.me/ISoonik", style="primary")
             ]
         ]
         video_link = "https://t.me/Joker73336/7"
@@ -2565,13 +2579,13 @@ async def cleanup_expired_loop():
 @client.on(events.CallbackQuery(data=b"menu_checker"))
 async def menu_checker_handler(event):
     await event.answer("⌛ Loading...")
-    text = f"""⚡️❤️‍🔥🆒🛷🥂💎💎☃️
+    text = f"""{gemj('fire_premium')}{gemj('heart_fire')}{gemj('cool')}{gemj('sled')}{gemj('wine')}{gemj('diamond')}{gemj('diamond')}{gemj('snowman')}
 
-⚡️ <b>{bs('CHECKER MENU')}</b> ❤️‍🔥
+{gemj('fire_premium')} <b>{bs('CHECKER MENU')}</b> {gemj('heart_fire')}
 <b>━━━━━━━━━━━━━━━━━</b>
-🥂 <b>{bs('Shopify Checker')}</b>
-│  ⚡️ <code>/sp cc|mm|yy|cvv</code>  ━  <b>{bs('Single CC')}</b>
-│  ⚡️ <code>/msp</code> (reply to list)  ━  <b>{bs('Mass CC')}</b>
+{gemj('wine')} <b>{bs('Shopify Checker')}</b>
+│  {gemj('fire_premium')} <code>/sp cc|mm|yy|cvv</code>  ━  <b>{bs('Single CC')}</b>
+│  {gemj('fire_premium')} <code>/msp</code> (reply to list)  ━  <b>{bs('Mass CC')}</b>
 <b>━━━━━━━━━━━━━━━━━</b>
 𝗗𝗲𝘃 → sonik"""
     await event.edit(text, buttons=[[Button.inline("🔙 Back", data="back_to_start", style="danger")]], parse_mode='html')
@@ -2579,9 +2593,9 @@ async def menu_checker_handler(event):
 @client.on(events.CallbackQuery(data=b"menu_sites"))
 async def menu_sites_handler(event):
     await event.answer("⌛ Loading...")
-    text = f"""⚡️❤️‍🔥🆒🛷🥂💎💎☃️
+    text = f"""{gemj('fire_premium')}{gemj('heart_fire')}{gemj('cool')}{gemj('sled')}{gemj('wine')}{gemj('diamond')}{gemj('diamond')}{gemj('snowman')}
 
-💎 <b>{bs('SITES CONTROL')}</b> 💎
+{gemj('diamond')} <b>{bs('SITES CONTROL')}</b> {gemj('diamond')}
 <b>━━━━━━━━━━━━━━━━━</b>
 │  ➕ <code>/add url</code>  ━  <b>{bs('Add sites')}</b>
 │  ➖ <code>/rm url</code>  ━  <b>{bs('Remove site')}</b>
@@ -2594,9 +2608,9 @@ async def menu_sites_handler(event):
 @client.on(events.CallbackQuery(data=b"menu_proxy"))
 async def menu_proxy_handler(event):
     await event.answer("⌛ Loading...")
-    text = f"""⚡️❤️‍🔥🆒🛷🥂💎💎☃️
+    text = f"""{gemj('fire_premium')}{gemj('heart_fire')}{gemj('cool')}{gemj('sled')}{gemj('wine')}{gemj('diamond')}{gemj('diamond')}{gemj('snowman')}
 
-🛷 <b>{bs('PROXY CONTROL')}</b> 🛷
+{gemj('sled')} <b>{bs('PROXY CONTROL')}</b> {gemj('sled')}
 <b>━━━━━━━━━━━━━━━━━</b>
 │  ➕ <code>/addpxy proxy</code>  ━  <b>{bs('Add proxy')}</b>
 │  📋 <code>/proxy</code>  ━  <b>{bs('View proxies')}</b>
@@ -2612,9 +2626,9 @@ async def menu_account_handler(event):
     uid = event.sender_id
     sub = await get_user_subscription(uid)
     access = "OWNER" if uid in ADMIN_ID else (sub["plan"].upper() if sub["is_active"] else "TRIAL")
-    text = f"""⚡️❤️‍🔥🆒🛷🥂💎💎☃️
+    text = f"""{gemj('fire_premium')}{gemj('heart_fire')}{gemj('cool')}{gemj('sled')}{gemj('wine')}{gemj('diamond')}{gemj('diamond')}{gemj('snowman')}
 
-🆒 <b>{bs('MY ACCOUNT')}</b> 🆒
+{gemj('cool')} <b>{bs('MY ACCOUNT')}</b> {gemj('cool')}
 <b>━━━━━━━━━━━━━━━━━</b>
 👤 <b>{bs('User')}:</b> <code>{uid}</code>
 📊 <b>{bs('Access')}:</b> <b>{access}</b>
@@ -2630,9 +2644,9 @@ async def menu_admin_handler(event):
     if uid not in ADMIN_ID:
         return await event.answer("🚫 Admin only!", alert=True)
     await event.answer("⌛ Loading...")
-    text = f"""⚡️❤️‍🔥🆒🛷🥂💎💎☃️
+    text = f"""{gemj('fire_premium')}{gemj('heart_fire')}{gemj('cool')}{gemj('sled')}{gemj('wine')}{gemj('diamond')}{gemj('diamond')}{gemj('snowman')}
 
-☃️ <b>{bs('ADMIN PANEL')}</b> ☃️
+{gemj('snowman')} <b>{bs('ADMIN PANEL')}</b> {gemj('snowman')}
 <b>━━━━━━━━━━━━━━━━━</b>
 │  🎁 <code>/code hours</code>  ━  <b>{bs('Gen Code')}</b>
 │  🚫 <code>/ban id</code>  ━  <b>{bs('Block user')}</b>
