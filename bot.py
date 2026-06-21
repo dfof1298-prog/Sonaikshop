@@ -105,7 +105,11 @@ REJECTED_GATEWAYS = [
     'Checkout.com - Onsite Payments',
     'stripe', 
     'stripe card payments',
-    'Stripe Card Payments'
+    'Stripe Card Payments',
+    'braintree',
+    'square',
+    'adyen',
+    'payoneer'
 ]
 
 # ====================== ACCEPTED RESPONSES ======================
@@ -134,10 +138,10 @@ REJECTED_RESPONSES = [
 ]
 
 PRICE_RANGES = {
-    "1": {"name": "0.50-5 USD", "min": 0.50, "max": 5},
-    "2": {"name": "0.50-10 USD", "min": 0.50, "max": 10},
-    "3": {"name": "0.50-20 USD", "min": 0.50, "max": 20},
-    "4": {"name": "0.50-40 USD", "min": 0.50, "max": 40},
+    "1": {"name": "0.01-5 USD", "min": 0.01, "max": 5},
+    "2": {"name": "0.01-10 USD", "min": 0.01, "max": 10},
+    "3": {"name": "0.01-20 USD", "min": 0.01, "max": 20},
+    "4": {"name": "0.01-40 USD", "min": 0.01, "max": 40},
     "5": {"name": "5-10 USD", "min": 5, "max": 10},
     "6": {"name": "5-20 USD", "min": 5, "max": 20},
     "7": {"name": "10-20 USD", "min": 10, "max": 20},
@@ -533,8 +537,9 @@ async def verify_site_full(site, proxy_data=None, http_session=None, max_retries
         gateway = await detect_payment_gateway(site, proxy_data, http_session)
         price = await get_site_product_price(site, proxy_data, http_session)
         
-        # Reject Authorize.Net, Checkout.com, and Stripe Card Payments
-        if gateway in REJECTED_GATEWAYS:
+        # Reject specific gateways (Case-insensitive check)
+        gw_lower = str(gateway).lower()
+        if any(rj.lower() in gw_lower for rj in REJECTED_GATEWAYS):
             return {
                 'site': site,
                 'status': 'rejected',
@@ -552,7 +557,7 @@ async def verify_site_full(site, proxy_data=None, http_session=None, max_retries
                 'price': None
             }
         
-        if price is not None and price < 0.50:
+        if price is not None and price < 0.01:
             price = None
         
         return {
@@ -1069,9 +1074,28 @@ async def send_channel_hit(res, uid, username, name):
 async def start(event):
     try:
         uid = event.sender_id
+        is_new = await db["users"].find_one({"user_id": uid}) is None
         await ensure_user(uid)
         await update_last_seen(uid)
         user = await db["users"].find_one({"user_id": uid})
+        
+        if is_new:
+            sender = await event.get_sender()
+            first_name = sender.first_name or "Unknown"
+            last_name = sender.last_name or ""
+            username = f"@{sender.username}" if sender.username else "No Username"
+            admin_msg = f"""🆕 <b>{bs('NEW USER')}</b> 🆕
+<b>━━━━━━━━━━━━━━━━━</b>
+👤 <b>{bs('Name')}:</b> <code>{first_name} {last_name}</code>
+🆔 <b>{bs('ID')}:</b> <code>{uid}</code>
+🔗 <b>{bs('User')}:</b> {username}
+<b>━━━━━━━━━━━━━━━━━</b>
+𝗗𝗲𝘃 → sonik"""
+            for admin_id in ADMIN_ID:
+                try:
+                    await client.send_message(admin_id, admin_msg, parse_mode='html')
+                except:
+                    pass
         if not await force_join_check(event): return
         if await is_banned_user(uid):
             t, e = banned_user_message()
@@ -1374,8 +1398,8 @@ async def add_site(event):
             return await styled_reply(event, f"⚠️ <b>{bs('All sites already exist')}</b> ⚠️\n📋 <b>{bs('Duplicates')}:</b> <code>{len(already_exists)}</code>", emoji_ids=[CE["warn"], CE["warn"], CE["info"]])
         PENDING_ADD_SITES[event.sender_id] = {"sites": new_sites, "exists": already_exists, "event": event}
         kb = [
-            [pbtn(f"💰 {bs('0.50-5 USD')}", f"add_price_range:1:{event.sender_id}"), pbtn(f"💰 {bs('0.50-10 USD')}", f"add_price_range:2:{event.sender_id}")],
-            [pbtn(f"💰 {bs('0.50-20 USD')}", f"add_price_range:3:{event.sender_id}"), pbtn(f"💰 {bs('0.50-40 USD')}", f"add_price_range:4:{event.sender_id}")],
+            [pbtn(f"💰 {bs('0.01-5 USD')}", f"add_price_range:1:{event.sender_id}"), pbtn(f"💰 {bs('0.01-10 USD')}", f"add_price_range:2:{event.sender_id}")],
+            [pbtn(f"💰 {bs('0.01-20 USD')}", f"add_price_range:3:{event.sender_id}"), pbtn(f"💰 {bs('0.01-40 USD')}", f"add_price_range:4:{event.sender_id}")],
             [pbtn(f"💰 {bs('5-10 USD')}", f"add_price_range:5:{event.sender_id}"), pbtn(f"💰 {bs('5-20 USD')}", f"add_price_range:6:{event.sender_id}")],
             [pbtn(f"💰 {bs('10-20 USD')}", f"add_price_range:7:{event.sender_id}"), pbtn(f"💰 {bs('20-40 USD')}", f"add_price_range:8:{event.sender_id}")],
         ]
@@ -1530,8 +1554,8 @@ async def check_sites_with_filter_cmd(event):
     if not sites:
         return await styled_reply(event, f"📋 <b>{bs('No sites')}</b>", emoji_ids=[CE["warn"]])
     kb = [
-        [pbtn(f"💰 {bs('0.50-5 USD')}", f"site_price_range:1:{event.sender_id}"), pbtn(f"💰 {bs('0.50-10 USD')}", f"site_price_range:2:{event.sender_id}")],
-        [pbtn(f"💰 {bs('0.50-20 USD')}", f"site_price_range:3:{event.sender_id}"), pbtn(f"💰 {bs('0.50-40 USD')}", f"site_price_range:4:{event.sender_id}")],
+        [pbtn(f"💰 {bs('0.01-5 USD')}", f"site_price_range:1:{event.sender_id}"), pbtn(f"💰 {bs('0.01-10 USD')}", f"site_price_range:2:{event.sender_id}")],
+        [pbtn(f"💰 {bs('0.01-20 USD')}", f"site_price_range:3:{event.sender_id}"), pbtn(f"💰 {bs('0.01-40 USD')}", f"site_price_range:4:{event.sender_id}")],
         [pbtn(f"💰 {bs('5-10 USD')}", f"site_price_range:5:{event.sender_id}"), pbtn(f"💰 {bs('5-20 USD')}", f"site_price_range:6:{event.sender_id}")],
         [pbtn(f"💰 {bs('10-20 USD')}", f"site_price_range:7:{event.sender_id}"), pbtn(f"💰 {bs('20-40 USD')}", f"site_price_range:8:{event.sender_id}")],
         [pbtn(f"📊 {bs('All Sites (No Filter)')}", f"site_price_range:0:{event.sender_id}")],
@@ -2652,7 +2676,7 @@ async def main():
             log_system("BOOT", f"✅ Sonik Bot (@{MAIN_BOT_USERNAME}) started!")
             log_system("BOOT", "✅ Enhanced features: Only accepted responses (3DS_REQUIRED, INSUFFICIENT_FUNDS, CARD_DECLINED, ORDER_PAID, CHARGED, PAYMENT_SUCCESSFUL)")
             log_system("BOOT", "✅ Rejected responses: empty submit, no valid payment, cart failed, checkout token errors")
-            log_system("BOOT", "✅ Price filtering from 0.50 USD")
+            log_system("BOOT", "✅ Price filtering from 0.01 USD")
             log_system("BOOT", "✅ 3ds_required classified as Approved")
             log_system("BOOT", "✅ Code system enabled: /code and /redeem")
             log_system("BOOT", "✅ Proxy required for /sp and /msp")
