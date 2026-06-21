@@ -8,6 +8,10 @@
 # Fixed: detect_payment_gateway now accepts only specific responses
 # Fixed: /redeem timezone issue
 # Enhanced: Connection limits for better performance
+# Fixed: Inline menu buttons (menu_checker, menu_sites, menu_proxy, menu_account, menu_admin, back_to_start)
+# Fixed: Menu text formatting with proper emojis and alignment
+# Fixed: Removed broken <code> tags from menu text
+# Fixed: Added Stripe Card Payments and Checkout.com - Onsite Payments to rejected gateways
 
 from telethon.errors import FloodWaitError
 from telethon import TelegramClient, events, Button
@@ -92,8 +96,17 @@ _BIN_CACHE = {}
 _BIN_CACHE_TIME = {}
 _BIN_CACHE_TTL = 3600
 
-# Gateway settings - REJECT Authorize.Net AND Checkout.com ONLY
-REJECTED_GATEWAYS = ['authorize.net', 'authorize', 'checkout.com', 'checkout', 'Checkout.com - Onsite Payments']
+# Gateway settings - REJECT Authorize.Net, Checkout.com, AND Stripe Card Payments
+REJECTED_GATEWAYS = [
+    'authorize.net', 
+    'authorize', 
+    'checkout.com', 
+    'checkout', 
+    'Checkout.com - Onsite Payments',
+    'stripe', 
+    'stripe card payments',
+    'Stripe Card Payments'
+]
 
 # ====================== ACCEPTED RESPONSES ======================
 # Only these responses will be accepted in /add and /site
@@ -520,8 +533,8 @@ async def verify_site_full(site, proxy_data=None, http_session=None, max_retries
         gateway = await detect_payment_gateway(site, proxy_data, http_session)
         price = await get_site_product_price(site, proxy_data, http_session)
         
-        # Reject Authorize.Net and Checkout.com only
-        if gateway in ['authorize.net', 'authorize', 'checkout.com', 'checkout', 'Checkout.com - Onsite Payments']:
+        # Reject Authorize.Net, Checkout.com, and Stripe Card Payments
+        if gateway in REJECTED_GATEWAYS:
             return {
                 'site': site,
                 'status': 'rejected',
@@ -978,30 +991,33 @@ async def test_site(site, proxy_data=None, http_session=None):
 # ====================== CARD FORMATTING ======================
 def format_simple_card_result(status, card, gateway, response, bin_info=None, elapsed=0.0, extra_field=None):
     sm = {
-        "Charged": (f"🔥 <b>{bs('CHARGED')}</b> 🔥", [CE["fire"]]),
+        "Charged": (f"❤️‍🔥 <b>{bs('CHARGED')}</b> ❤️‍🔥", [CE["fire"]]),
         "Approved": (f"✅ <b>{bs('APPROVED')}</b> ✅", [CE["check"]]),
         "Declined": (f"❌ <b>{bs('DECLINED')}</b> ❌", [CE["declined"]]),
         "Error": (f"⚠️ <b>{bs('ERROR')}</b> ⚠️", [CE["cross"]])
     }
     h, he = sm.get(status, sm["Declined"])
     bi = bin_info or {"brand": "-", "type": "-", "level": "-", "bank": "-", "country": "-", "flag": "🏳️"}
-    el = f"\n💰 <b>{bs(extra_field[0])}</b> ━ <code>{extra_field[1]}</code>" if extra_field else ""
+    extra = ""
+    if extra_field:
+        extra = f"💰 <b>{bs(extra_field[0])}</b> ━ <code>{extra_field[1]}</code>\n"
     return f"""{h}
 <b>━━━━━━━━━━━━━━━━━</b>
 💳 <b>{bs('Card')}</b>
 ⤷ <code>{card}</code>
 🌐 <b>{bs('Gateway')}</b> ━ <code>{gateway}</code>
-📝 <b>{bs('Response')}</b> ━ <code>{response}</code>{el}
-<b>━━━━━━━━━━━━━━━━━</b>
+📝 <b>{bs('Response')}</b> ━ <code>{response}</code>
+{extra}<b>━━━━━━━━━━━━━━━━━</b>
 🔢 <b>{bs('BIN')}:</b> <code>{bi.get('brand', '-')} | {bi.get('type', '-')} | {bi.get('level', '-')}</code>
 🏦 <b>{bs('Bank')}:</b> <code>{bi.get('bank', '-')}</code>
 🌍 <b>{bs('Country')}:</b> <code>{bi.get('country', '-')} {bi.get('flag', '🏳️')}</code>
-
-⏱️ <b>{bs('Took')}</b> ⏱ <code>{elapsed:.2f}{bs('s')}</code>""", he
+<b>━━━━━━━━━━━━━━━━━</b>
+⏱️ <b>{bs('Took')}</b> ⏱ <code>{elapsed:.2f}{bs('s')}</code>
+𝗗𝗲𝘃 → sonik""", he
 
 def format_card_result(status, card, gateway, response, price="-", site="-", bin_info=None, elapsed=0.0):
     sm = {
-        "Charged": (f"🔥 <b>{bs('CHARGED')}</b> 🔥", [CE["fire"]]),
+        "Charged": (f"❤️‍🔥 <b>{bs('CHARGED')}</b> ❤️‍🔥", [CE["fire"]]),
         "Approved": (f"✅ <b>{bs('APPROVED')}</b> ✅", [CE["check"]]),
         "Declined": (f"❌ <b>{bs('DECLINED')}</b> ❌", [CE["declined"]]),
         "Error": (f"⚠️ <b>{bs('ERROR')}</b> ⚠️", [CE["cross"]])
@@ -1020,8 +1036,9 @@ def format_card_result(status, card, gateway, response, price="-", site="-", bin
 🔢 <b>{bs('BIN')}:</b> <code>{bi.get('brand', '-')} | {bi.get('type', '-')} | {bi.get('level', '-')}</code>
 🏦 <b>{bs('Bank')}:</b> <code>{bi.get('bank', '-')}</code>
 🌍 <b>{bs('Country')}:</b> <code>{bi.get('country', '-')} {bi.get('flag', '🏳️')}</code>
-
-⏱️ <b>{bs('Took')}</b> ⏱ <code>{elapsed:.2f}{bs('s')}</code>""", he
+<b>━━━━━━━━━━━━━━━━━</b>
+⏱️ <b>{bs('Took')}</b> ⏱ <code>{elapsed:.2f}{bs('s')}</code>
+𝗗𝗲𝘃 → sonik""", he
 
 # ====================== HIT NOTIFICATIONS ======================
 async def send_channel_hit(res, uid, username, name):
@@ -1031,12 +1048,17 @@ async def send_channel_hit(res, uid, username, name):
             prof = f"https://t.me/{username}" if username and not username.startswith("user_") else f"tg://user?id={uid}"
             gw = res.get('Gateway', 'Shopify')
             resp = res.get('Response', '')
-            msg = f"""🎯 <b>{bs('HIT')} ➛ {bs(sv)}</b> 🎯
+            status_emoji = "❤️‍🔥" if sv == "CHARGED" else "✅"
+            msg = f"""{status_emoji} <b>{bs(sv)}</b> {status_emoji}
 <b>━━━━━━━━━━━━━━━━━</b>
-🌐 <b>{bs('Gateway')} ➛ {gw}</b>
-📝 <b>{bs('Response')} ➛ {resp}</b>
-💰 <b>{bs('Price')} ➛ {res.get('Price', '-')}</b>
-👤 <b>{bs('User')} ➛ <a href="{prof}">{name}</a></b>"""
+💳 <b>{bs('Card')}</b>
+⤷ <code>{res.get('Card', '-')}</code>
+🌐 <b>{bs('Gateway')}</b> ━ <code>{gw}</code>
+📝 <b>{bs('Response')}</b> ━ <code>{resp}</code>
+💰 <b>{bs('Price')}</b> ━ <code>{res.get('Price', '-')}</code>
+👤 <b>{bs('User')}</b> ━ <a href="{prof}">{name}</a>
+<b>━━━━━━━━━━━━━━━━━</b>
+𝗗𝗲𝘃 → sonik"""
             HIT_BUTTON = [[Button.url("🚀 " + bs("Sonik"), f"https://t.me/{MAIN_BOT_USERNAME}")]]
             await styled_send(HIT_CHANNEL_ID, msg, buttons=HIT_BUTTON, emoji_ids=[CE["fire"]])
     except:
@@ -1049,91 +1071,50 @@ async def start(event):
         uid = event.sender_id
         await ensure_user(uid)
         await update_last_seen(uid)
-        
         user = await db["users"].find_one({"user_id": uid})
-        if user and user.get("created_at"):
-            created = user["created_at"]
-            if isinstance(created, datetime):
-                now = datetime.now(timezone.utc)
-                if created.tzinfo is None:
-                    created = created.replace(tzinfo=timezone.utc)
-                if (now - created).total_seconds() < 60:
-                    try:
-                        sender = await event.get_sender()
-                        name = sender.first_name or "No name"
-                        username = f"@{sender.username}" if sender.username else "No username"
-                        for admin in ADMIN_ID:
-                            await styled_send(admin, f"""📢 <b>New User!</b>
-<b>━━━━━━━━━━━━━━━━━</b>
-🆔 <b>ID:</b> <code>{uid}</code>
-👤 <b>Name:</b> {name}
-📛 <b>Username:</b> {username}
-⏰ <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}""", emoji_ids=[CE["party"]])
-                    except:
-                        pass
-        
-        if not await force_join_check(event):
-            return
-        
+        if not await force_join_check(event): return
         if await is_banned_user(uid):
             t, e = banned_user_message()
             return await styled_reply(event, t, emoji_ids=e)
         
         sub = await get_user_subscription(uid)
+        user_name = (await event.get_sender()).first_name or "User"
+        access_type = "OWNER" if uid in ADMIN_ID else (sub["plan"].upper() if sub["is_active"] else "TRIAL")
+        credits = "Unlimited" if uid in ADMIN_ID else "250"
+        joined_date = user.get("created_at", datetime.now()).strftime("%Y-%m-%d") if user else datetime.now().strftime("%Y-%m-%d")
         
-        if uid in ADMIN_ID:
-            status_line = f"👑 <b>{bs('STATUS')}</b> ━ 👑 <b>{bs('ADMIN')}</b> 👑"
-            se = [CE["crown"]]
-        elif sub["is_active"]:
-            remaining = sub["remaining_hours"]
-            remaining_str = f"{int(remaining * 60)} min" if remaining < 1 else f"{remaining:.1f} h"
-            status_line = f"✅ <b>{bs('STATUS')}</b> ━ ✅ <b>{bs('Active')}</b> ✅ | {remaining_str}"
-            se = [CE["check"]]
-        else:
-            status_line = f"❌ <b>{bs('STATUS')}</b> ━ ❌ {bs('No Subscription')}"
-            se = [CE["cross"]]
-        
-        text = f"""⚡ <b><i>{bs('Sonik')}</i></b> ⚡
+        text = f"""⚡️❤️‍🔥🆒🛷🥂💎💎☃️
+
+👤 <b>{bs('User')}:</b> <i>{user_name}</i> 🃏
+🆔 <b>{bs('User ID')}:</b> <code>{uid}</code>
+📊 <b>{bs('Access')}:</b> <b>{access_type}</b>
+💳 <b>{bs('Credits')}:</b> <code>{credits}</code>
+📅 <b>{bs('Joined')}:</b> <code>{joined_date}</code>
 <b>━━━━━━━━━━━━━━━━━</b>
-🛍️ <b><i>{bs('Shopify Checker')}</i></b>
-|   ⚡ <code>/sp</code> ━ <b>{bs('Single CC')}</b>
-|   ⚡ <code>/msp</code> ━ <b>{bs('Mass CC')}</b>
+𝗗𝗲𝘃 → sonik"""
 
-🌐 <b><i>{bs('Sites')}</i></b>
-|   ➕ <code>/add</code> ━ <b>{bs('Add sites')}</b>
-|   ➖ <code>/rm</code> ━ <b>{bs('Remove')}</b>
-|   📋 <code>/sites</code> ━ <b>{bs('View')}</b>
-|   🔍 <code>/site</code> ━ <b>{bs('Test all')}</b>
-
-🛡️ <b><i>{bs('Proxy')}</i></b>
-|   ➕ <code>/addpxy</code> ━ <b>{bs('Add')}</b>
-|   📋 <code>/proxy</code> ━ <b>{bs('View')}</b>
-|   🔍 <code>/chkpxy</code> ━ <b>{bs('Test')}</b>
-|   ➖ <code>/rmpxy</code> ━ <b>{bs('Remove')}</b>
-
-👤 <b><i>{bs('Account')}</i></b>
-|   📊 <code>/info</code> ━ <b>{bs('Profile')}</b>
-|   🎁 <code>/redeem</code> ━ <b>{bs('Redeem Code')}</b>
-
-👑 <b><i>{bs('Admin')}</i></b>
-|   🎁 <code>/code</code> ━ <b>{bs('Generate Code')}</b>
-|   🚫 <code>/ban</code> ━ <b>{bs('Block user')}</b>
-|   ✅ <code>/unblock</code> ━ <b>{bs('Unblock user')}</b>
-|   👥 <code>/users</code> ━ <b>{bs('All users')}</b>
-|   📢 <code>/broadcast</code> ━ <b>{bs('Send message to all')}</b>
-|   🎁 <code>/give</code> ━ <b>{bs('Give sub')}</b>
-|   📊 <code>/stats</code> ━ <b>{bs('Statistics')}</b>
-|   🔄 <code>/resetsites</code> ━ <b>{bs('Clear sites')}</b>
-|   🔧 <code>/maintenance on/off</code> ━ <b>{bs('Maintenance')}</b>
-|   ⛔ <code>/stop</code> ━ <b>{bs('Stop mass')}</b>
-|   📋 <code>/codes</code> ━ <b>{bs('List codes')}</b>
-<b>━━━━━━━━━━━━━━━━━</b>
-{status_line}"""
-        
-        kb = [[pbtn("💎 " + bs("Subscribe"), url=f"https://t.me/{PAYMENT_BOT_USERNAME}"), pbtn("🆘 " + bs("Support"), url="https://t.me/ISoonik")],
-              [pbtn("📢 " + bs("Channel"), url=JOIN_CHANNEL_LINK)]]
-        ei = [CE["bolt"], CE["bolt"], CE["search"], CE["pin"], CE["fire"], CE["brain"], CE["shield"], CE["link"], CE["eyes"], CE["trash"], CE["info"], CE["crown"]] + se
-        await styled_reply(event, text, buttons=kb, emoji_ids=ei)
+        kb = [
+            [
+                Button.inline("⚡️ CHECKER MENU", data="menu_checker", style="success"), 
+                Button.inline("💎 SITES CONTROL", data="menu_sites", style="success")
+            ],
+            [
+                Button.inline("🛷 PROXY CONTROL", data="menu_proxy", style="danger"), 
+                Button.inline("🆒 MY ACCOUNT", data="menu_account", style="danger")
+            ],
+            [
+                Button.inline("☃️ ADMIN PANEL", data="menu_admin", style="primary")
+            ],
+            [
+                Button.url("🥂 UPGRADE TO PREMIUM", url=f"https://t.me/{PAYMENT_BOT_USERNAME}", style="success")
+            ],
+            [
+                Button.url("❤️‍🔥 OFFICIAL CHANNEL", url="https://t.me/ReGict7", style="primary"), 
+                Button.url("🆒 SUPPORT", url="https://t.me/ISoonik", style="primary")
+            ]
+        ]
+        video_link = "https://t.me/Joker73336/7"
+        await client.send_file(event.chat_id, video_link, caption=text, buttons=kb, parse_mode='html')
     except Exception as e:
         log_user(event.sender_id, "START_ERROR", f"Error={e}", "error")
 
@@ -2282,14 +2263,16 @@ async def mass_check_cmd(event):
         cards = cards[:10000]
         await styled_reply(event, f"⚠️ <b>{bs('Limited to 10000 cards per check')}</b>", emoji_ids=[CE["warn"]])
     kb = [
-        [pbtn("🔥 Charged Only", f"mass_filter:charged:{uid}")],
-        [pbtn("✅ Approved Only", f"mass_filter:approved:{uid}")],
-        [pbtn("⭐ Charged + Approved", f"mass_filter:both:{uid}")]
+        [pbtn(f"❤️‍🔥 {bs('CHARGED ONLY')}", f"mass_filter:charged:{uid}", style="danger")],
+        [pbtn(f"✅ {bs('APPROVED ONLY')}", f"mass_filter:approved:{uid}", style="success")],
+        [pbtn(f"⚡️ {bs('BOTH (CHARGED + APPROVED)')}", f"mass_filter:both:{uid}", style="primary")]
     ]
-    pm = await styled_reply(event, f"""📊 <b>{bs('Choose what to send in chat')}</b>
+    pm = await styled_reply(event, f"""📊 <b>{bs('MASS CHECKER CONFIG')}</b>
 <b>━━━━━━━━━━━━━━━━━</b>
-💡 <i>{bs('Select which results you want to receive')}</i>
-📋 <code>{len(cards)}</code> {bs('cards loaded')}""", buttons=kb, emoji_ids=[CE["chart"], CE["fire"]])
+📋 <b>{bs('Cards Loaded')}:</b> <code>{len(cards)}</code>
+💡 <i>{bs('Choose which results you want to receive in chat')}</i>
+<b>━━━━━━━━━━━━━━━━━</b>
+𝗗𝗲𝘃 → sonik""", buttons=kb, emoji_ids=[CE["chart"], CE["fire"]])
     USER_APPROVED_PREF[f"mass_{uid}"] = {"cards": cards, "sites": sites, "proxies": proxies, "event": event, "pref_msg": pm, "rotator": SmartRotator()}
 
 @client.on(events.CallbackQuery(pattern=rb"mass_filter:(charged|approved|both):(\d+)"))
@@ -2384,15 +2367,16 @@ async def _run_mass_process(event, cards, proxies, send_approved, process_store,
             return
         last_ui[0] = now
         kb = [
-            [pbtn(f" {lcd}", "none")],
-            [pbtn(f" {lrd}", "none")],
-            [pbtn(f"🔥 {bs('C')} ━ {charged}", "none"), pbtn(f"✅ {bs('A')} ━ {approved}", "none")],
-            [pbtn(f"❌ {bs('D')} ━ {declined}", "none"), pbtn(f"⚠️ {bs('E')} ━ {errors}", "none")],
-            [pbtn(f"📋 {checked}/{total}", "none")],
-            [pbtn("⛔ " + bs("Stop"), f"{stop_prefix}:{uid}")]
+            [pbtn(f"💳 {lcd}", "none", style="primary")],
+            [pbtn(f"📝 {lrd}", "none", style="primary")],
+            [pbtn(f"❤️‍🔥 {bs('CHARGED')} ━ {charged}", "none", style="danger")],
+            [pbtn(f"✅ {bs('APPROVED')} ━ {approved}", "none", style="success")],
+            [pbtn(f"❌ {bs('DECLINED')} ━ {declined}", "none", style="danger"), pbtn(f"⚠️ {bs('ERROR')} ━ {errors}", "none", style="danger")],
+            [pbtn(f"📋 {checked} / {total}", "none", style="primary")],
+            [pbtn(f"⛔ {bs('STOP PROCESS')}", f"{stop_prefix}:{uid}", style="danger")]
         ]
         try:
-            await styled_edit(sm, f"⚡ <b>{bs('Processing')}...</b>", buttons=kb, emoji_ids=[CE["star"]])
+            await styled_edit(sm, f"⚡️ <b>{bs('MASS CHECKING IN PROGRESS')}</b> ⚡️\n<b>━━━━━━━━━━━━━━━━━</b>\n⏳ <b>{bs('Elapsed')}:</b> <code>{int(time.time()-st)}s</code>\n<b>━━━━━━━━━━━━━━━━━</b>", buttons=kb, emoji_ids=[CE["chart"]])
         except:
             pass
     
@@ -2553,6 +2537,96 @@ async def cleanup_expired_loop():
             log_system("CLEANUP", f"Error: {e}", "error")
         await asyncio.sleep(3600)
 
+# ====================== INLINE MENU HANDLERS ======================
+@client.on(events.CallbackQuery(data=b"menu_checker"))
+async def menu_checker_handler(event):
+    await event.answer("⌛ Loading...")
+    text = f"""⚡️❤️‍🔥🆒🛷🥂💎💎☃️
+
+⚡️ <b>{bs('CHECKER MENU')}</b> ❤️‍🔥
+<b>━━━━━━━━━━━━━━━━━</b>
+🥂 <b>{bs('Shopify Checker')}</b>
+│  ⚡️ <code>/sp cc|mm|yy|cvv</code>  ━  <b>{bs('Single CC')}</b>
+│  ⚡️ <code>/msp</code> (reply to list)  ━  <b>{bs('Mass CC')}</b>
+<b>━━━━━━━━━━━━━━━━━</b>
+𝗗𝗲𝘃 → sonik"""
+    await event.edit(text, buttons=[[Button.inline("🔙 Back", data="back_to_start", style="danger")]], parse_mode='html')
+
+@client.on(events.CallbackQuery(data=b"menu_sites"))
+async def menu_sites_handler(event):
+    await event.answer("⌛ Loading...")
+    text = f"""⚡️❤️‍🔥🆒🛷🥂💎💎☃️
+
+💎 <b>{bs('SITES CONTROL')}</b> 💎
+<b>━━━━━━━━━━━━━━━━━</b>
+│  ➕ <code>/add url</code>  ━  <b>{bs('Add sites')}</b>
+│  ➖ <code>/rm url</code>  ━  <b>{bs('Remove site')}</b>
+│  📋 <code>/sites</code>  ━  <b>{bs('View all sites')}</b>
+│  🔍 <code>/site</code>  ━  <b>{bs('Test all sites')}</b>
+<b>━━━━━━━━━━━━━━━━━</b>
+𝗗𝗲𝘃 → sonik"""
+    await event.edit(text, buttons=[[Button.inline("🔙 Back", data="back_to_start", style="danger")]], parse_mode='html')
+
+@client.on(events.CallbackQuery(data=b"menu_proxy"))
+async def menu_proxy_handler(event):
+    await event.answer("⌛ Loading...")
+    text = f"""⚡️❤️‍🔥🆒🛷🥂💎💎☃️
+
+🛷 <b>{bs('PROXY CONTROL')}</b> 🛷
+<b>━━━━━━━━━━━━━━━━━</b>
+│  ➕ <code>/addpxy proxy</code>  ━  <b>{bs('Add proxy')}</b>
+│  📋 <code>/proxy</code>  ━  <b>{bs('View proxies')}</b>
+│  🔍 <code>/chkpxy</code>  ━  <b>{bs('Test proxies')}</b>
+│  ➖ <code>/rmpxy</code>  ━  <b>{bs('Remove all')}</b>
+<b>━━━━━━━━━━━━━━━━━</b>
+𝗗𝗲𝘃 → sonik"""
+    await event.edit(text, buttons=[[Button.inline("🔙 Back", data="back_to_start", style="danger")]], parse_mode='html')
+
+@client.on(events.CallbackQuery(data=b"menu_account"))
+async def menu_account_handler(event):
+    await event.answer("⌛ Loading...")
+    uid = event.sender_id
+    sub = await get_user_subscription(uid)
+    access = "OWNER" if uid in ADMIN_ID else (sub["plan"].upper() if sub["is_active"] else "TRIAL")
+    text = f"""⚡️❤️‍🔥🆒🛷🥂💎💎☃️
+
+🆒 <b>{bs('MY ACCOUNT')}</b> 🆒
+<b>━━━━━━━━━━━━━━━━━</b>
+👤 <b>{bs('User')}:</b> <code>{uid}</code>
+📊 <b>{bs('Access')}:</b> <b>{access}</b>
+🎁 <code>/redeem code</code>  ━  <b>{bs('Redeem Code')}</b>
+📊 <code>/info</code>  ━  <b>{bs('Full Stats')}</b>
+<b>━━━━━━━━━━━━━━━━━</b>
+𝗗𝗲𝘃 → sonik"""
+    await event.edit(text, buttons=[[Button.inline("🔙 Back", data="back_to_start", style="danger")]], parse_mode='html')
+
+@client.on(events.CallbackQuery(data=b"menu_admin"))
+async def menu_admin_handler(event):
+    uid = event.sender_id
+    if uid not in ADMIN_ID:
+        return await event.answer("🚫 Admin only!", alert=True)
+    await event.answer("⌛ Loading...")
+    text = f"""⚡️❤️‍🔥🆒🛷🥂💎💎☃️
+
+☃️ <b>{bs('ADMIN PANEL')}</b> ☃️
+<b>━━━━━━━━━━━━━━━━━</b>
+│  🎁 <code>/code hours</code>  ━  <b>{bs('Gen Code')}</b>
+│  🚫 <code>/ban id</code>  ━  <b>{bs('Block user')}</b>
+│  📢 <code>/broadcast</code>  ━  <b>{bs('Global Msg')}</b>
+│  🛠 <code>/maintenance</code>  ━  <b>{bs('Toggle')}</b>
+<b>━━━━━━━━━━━━━━━━━</b>
+𝗗𝗲𝘃 → sonik"""
+    await event.edit(text, buttons=[[Button.inline("🔙 Back", data="back_to_start", style="danger")]], parse_mode='html')
+
+@client.on(events.CallbackQuery(data=b"back_to_start"))
+async def back_to_start_handler(event):
+    await event.answer("🔙 Returning...")
+    try:
+        await event.delete()
+    except:
+        pass
+    await start(event)
+
 # ====================== MAIN ======================
 async def main():
     global MAIN_BOT_USERNAME, client_instance
@@ -2583,6 +2657,7 @@ async def main():
             log_system("BOOT", "✅ Code system enabled: /code and /redeem")
             log_system("BOOT", "✅ Proxy required for /sp and /msp")
             log_system("BOOT", "✅ High load support with reduced workers")
+            log_system("BOOT", "✅ Rejected gateways: Authorize.Net, Checkout.com, Stripe Card Payments")
             await client.run_until_disconnected()
         except FloodWaitError as e:
             log_system("FLOOD", f"Sleeping {e.seconds+5}s", "warning")
