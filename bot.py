@@ -120,7 +120,7 @@ JOIN_GROUP_LINK = "https://t.me/ReGict7"
 
 JOIN_CHANNEL_LINK = "https://t.me/ReGict7"
 
-API_BASE_URL = "https://web-production-669be.up.railway.app/shopify"
+API_BASE_URL = "http://62.72.20.10:8081"
 
 
 
